@@ -57,7 +57,17 @@ export default async function handler(req, res) {
 
   try {
     const queued = await withGeminiQueue(
-      () => analyzeMarket(input, (step, data) => trace.event(step, data)),
+      () =>
+        analyzeMarket(input, (step, data) => {
+          trace.event(step, data);
+          const messages = summarizeEvent(step, data);
+          messages.status.forEach((message) =>
+            sendStreamEvent(res, closed, "status", { message })
+          );
+          messages.detail.forEach((message) =>
+            sendStreamEvent(res, closed, "detail", { message })
+          );
+        }),
       {
         onQueue: (position) => {
           trace.event("queue_wait", { position });
@@ -144,6 +154,90 @@ function sendStreamEvent(res, closed, event, data) {
   if (closed || res.writableEnded) return;
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function summarizeEvent(step, data) {
+  const status = [];
+  const detail = [];
+
+  switch (step) {
+    case "gemini_request": {
+      const model = data?.model ? ` (${data.model})` : "";
+      const grounding = data?.use_tools ? " with grounding" : " without grounding";
+      status.push(`Calling Gemini${model}${grounding}...`);
+      break;
+    }
+    case "gemini_response": {
+      status.push(data?.grounding ? "Received grounded response." : "Received response.");
+      const { queries, sources } = extractGrounding(data?.grounding);
+      if (queries.length) {
+        detail.push(`Search queries: ${queries.join(", ")}`);
+      }
+      if (sources.length) {
+        detail.push(`Sources: ${sources.join(", ")}`);
+      }
+      break;
+    }
+    case "gemini_model_fallback": {
+      if (data?.from && data?.to) {
+        detail.push(`Model fallback: ${data.from} -> ${data.to}`);
+      }
+      break;
+    }
+    case "gemini_overload_fallback": {
+      if (data?.from && data?.to) {
+        detail.push(`Overload fallback: ${data.from} -> ${data.to}`);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
+  return { status, detail };
+}
+
+function extractGrounding(grounding) {
+  const queries = [];
+  const sources = [];
+
+  const queryItems = Array.isArray(grounding?.webSearchQueries)
+    ? grounding.webSearchQueries
+    : [];
+  queryItems.forEach((item) => {
+    if (typeof item === "string") {
+      queries.push(item);
+    } else if (item?.searchQuery) {
+      queries.push(item.searchQuery);
+    }
+  });
+
+  const chunks = Array.isArray(grounding?.groundingChunks) ? grounding.groundingChunks : [];
+  chunks.forEach((chunk) => {
+    const uri = chunk?.web?.uri || chunk?.uri;
+    if (typeof uri === "string") {
+      const domain = toDomain(uri);
+      if (domain) sources.push(domain);
+    }
+  });
+
+  return {
+    queries: unique(queries).slice(0, 5),
+    sources: unique(sources).slice(0, 5)
+  };
+}
+
+function toDomain(uri) {
+  try {
+    const parsed = new URL(uri);
+    return parsed.hostname;
+  } catch (err) {
+    return "";
+  }
+}
+
+function unique(items) {
+  return Array.from(new Set(items.filter(Boolean)));
 }
 
 function normalizeKey(value) {
