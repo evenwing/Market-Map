@@ -6,6 +6,7 @@
     { "src": "/(.*)", "dest": "/public/$1" }
   ],
   "functions": {
-    "api/analyze.js": { "maxDuration": 60 }
+    "api/analyze.js": { "maxDuration": 60 },
+    "api/analyze/stream.js": { "maxDuration": 60 }
   }
 }

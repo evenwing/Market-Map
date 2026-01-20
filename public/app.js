@@ -11,6 +11,10 @@ const apologyMessage = document.getElementById("apology-message");
 const apologyHint = document.getElementById("apology-hint");
 const categoryTitle = document.getElementById("category-title");
 const rankingBasis = document.getElementById("ranking-basis");
+let eventSource = null;
+let streamDone = false;
+const statusLines = [];
+const MAX_STATUS_LINES = 8;
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -26,7 +30,7 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
-  runAnalysis(query);
+  startStream(query);
 });
 
 async function analyzeMarket(query) {
@@ -37,10 +41,41 @@ async function analyzeMarket(query) {
   });
 
   if (!response.ok) {
-    throw new Error("Request failed");
+    const detail = await readErrorDetail(response);
+    const status = response.status || 0;
+    const suffix = detail ? `: ${detail}` : "";
+    throw new Error(`Request failed (${status})${suffix}`);
   }
 
   return await response.json();
+}
+
+async function readErrorDetail(response) {
+  let text = "";
+  try {
+    text = await response.text();
+  } catch (err) {
+    return response.statusText || "";
+  }
+
+  const trimmed = (text || "").trim();
+  if (!trimmed) {
+    return response.statusText || "";
+  }
+
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed?.error === "string") return parsed.error;
+      if (typeof parsed?.message === "string") return parsed.message;
+      return JSON.stringify(parsed);
+    } catch (err) {
+      // Fall through to raw text.
+    }
+  }
+
+  const maxLen = 240;
+  return trimmed.length > maxLen ? `${trimmed.slice(0, maxLen)}...` : trimmed;
 }
 
 function setLoading(isLoading) {
@@ -51,7 +86,71 @@ function setLoading(isLoading) {
   loading.setAttribute("aria-hidden", isLoading ? "false" : "true");
 }
 
-async function runAnalysis(query) {
+function startStream(query) {
+  clearPreviousView();
+  setLoading(true);
+
+  if (!window.EventSource) {
+    runFallback(query);
+    return;
+  }
+
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+
+  streamDone = false;
+  clearStatus();
+  setDebug("");
+
+  const streamUrl = `/api/analyze/stream?input=${encodeURIComponent(query)}`;
+  const source = new EventSource(streamUrl);
+  eventSource = source;
+
+  source.addEventListener("status", (event) => {
+    appendStatusLine(readMessage(event), "status");
+  });
+
+  source.addEventListener("detail", (event) => {
+    appendStatusLine(readMessage(event), "detail");
+  });
+
+  source.addEventListener("debug", (event) => {
+    const data = readData(event);
+    if (data?.message) {
+      setDebug(data.message);
+    }
+  });
+
+  source.addEventListener("final", (event) => {
+    streamDone = true;
+    const payload = readData(event);
+    if (payload?.mode === "apology") {
+      renderApology(payload);
+    } else if (payload) {
+      renderResults(payload);
+    }
+    source.close();
+    setLoading(false);
+  });
+
+  source.addEventListener("error", () => {
+    if (streamDone) return;
+    source.close();
+    renderApology({
+      apology: {
+        title: "Signal Lost",
+        message: "Sorry - I analyze software markets only.",
+        hint: "Try: CRM, payments, video conferencing."
+      },
+      debug: { message: "Stream connection error." }
+    });
+    setLoading(false);
+  });
+}
+
+async function runFallback(query) {
   clearPreviousView();
   setLoading(true);
   try {
@@ -79,7 +178,7 @@ function clearPreviousView() {
   results.innerHTML = "";
   results.classList.add("hidden");
   apology.classList.add("hidden");
-  status.innerHTML = "";
+  clearStatus();
   setDebug("");
 }
 
@@ -261,4 +360,42 @@ function renderEvidenceText(text) {
   }
 
   return fragment;
+}
+
+function appendStatusLine(message, type) {
+  if (!message) return;
+  statusLines.push({ message, type });
+  if (statusLines.length > MAX_STATUS_LINES) {
+    statusLines.shift();
+  }
+  renderStatusLines();
+}
+
+function renderStatusLines() {
+  status.innerHTML = "";
+  statusLines.forEach((line) => {
+    const item = document.createElement("div");
+    item.className = `status-line ${line.type === "detail" ? "status-detail" : ""}`.trim();
+    item.textContent = line.message;
+    status.appendChild(item);
+  });
+}
+
+function clearStatus() {
+  statusLines.length = 0;
+  status.innerHTML = "";
+}
+
+function readMessage(event) {
+  const data = readData(event);
+  return data?.message || "";
+}
+
+function readData(event) {
+  if (!event?.data) return null;
+  try {
+    return JSON.parse(event.data);
+  } catch (err) {
+    return null;
+  }
 }

@@ -8,6 +8,7 @@ import crypto from "crypto";
 import { analyzeMarket, warmGemini } from "./lib/gemini.js";
 import { renderHtml } from "./lib/render.js";
 import { createTrace } from "./lib/braintrust.js";
+import { withGeminiQueue } from "./lib/queue.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
@@ -89,17 +90,58 @@ async function handleAnalyzeStream(req, res, requestUrl) {
   sendStreamEvent(res, closed, "status", { message: "Analyzing input..." });
 
   try {
-    const result = await analyzeMarket(input, (step, data) => {
-      trace.event(step, data);
-      const messages = summarizeEvent(step, data);
-      messages.status.forEach((message) =>
-        sendStreamEvent(res, closed, "status", { message })
-      );
-      messages.detail.forEach((message) =>
-        sendStreamEvent(res, closed, "detail", { message })
-      );
-    });
+    const queued = await withGeminiQueue(
+      () =>
+        analyzeMarket(input, (step, data) => {
+          trace.event(step, data);
+          const messages = summarizeEvent(step, data);
+          messages.status.forEach((message) =>
+            sendStreamEvent(res, closed, "status", { message })
+          );
+          messages.detail.forEach((message) =>
+            sendStreamEvent(res, closed, "detail", { message })
+          );
+        }),
+      {
+        onQueue: (position) => {
+          trace.event("queue_wait", { position });
+          sendStreamEvent(res, closed, "status", {
+            message: `Queued for analysis (${position})...`
+          });
+        }
+      }
+    );
 
+    if (queued.status === "timeout") {
+      const stale = findCachedPayload(input, { allowStale: true });
+      if (stale) {
+        trace.event("queue_timeout_cache", {
+          key: stale.key,
+          source: stale.source,
+          stale: stale.stale
+        });
+        sendStreamEvent(res, closed, "status", {
+          message: "Queue timeout. Returning cached results."
+        });
+        const html = renderHtml(stale.payload);
+        await trace.end(stale.payload, html);
+        sendStreamEvent(res, closed, "final", stale.payload);
+        res.end();
+        return;
+      }
+      const errorPayload = {
+        ...fallback,
+        debug: { message: "Server busy. Please retry." }
+      };
+      const html = renderHtml(errorPayload);
+      await trace.end(errorPayload, html);
+      sendStreamEvent(res, closed, "debug", { message: errorPayload.debug.message });
+      sendStreamEvent(res, closed, "final", errorPayload);
+      res.end();
+      return;
+    }
+
+    const result = queued.value;
     sendStreamEvent(res, closed, "status", { message: "Finalizing results..." });
     const html = renderHtml(result);
     await trace.end(result, html);
@@ -158,7 +200,41 @@ async function handleAnalyze(req, res) {
   }
 
   try {
-    const result = await analyzeMarket(input, (step, data) => trace.event(step, data));
+    const queued = await withGeminiQueue(
+      () => analyzeMarket(input, (step, data) => trace.event(step, data)),
+      {
+        onQueue: (position) => trace.event("queue_wait", { position })
+      }
+    );
+
+    if (queued.status === "timeout") {
+      const stale = findCachedPayload(input, { allowStale: true });
+      if (stale) {
+        trace.event("queue_timeout_cache", {
+          key: stale.key,
+          source: stale.source,
+          stale: stale.stale
+        });
+        const html = renderHtml(stale.payload);
+        await trace.end(stale.payload, html);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(stale.payload));
+        return;
+      }
+      const errorPayload = {
+        ...fallback,
+        debug: {
+          message: "Server busy. Please retry."
+        }
+      };
+      const html = renderHtml(errorPayload);
+      await trace.end(errorPayload, html);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(errorPayload));
+      return;
+    }
+
+    const result = queued.value;
     const html = renderHtml(result);
     await trace.end(result, html);
 
@@ -380,26 +456,29 @@ function normalizeKey(value) {
   return value.trim().toLowerCase();
 }
 
-function getCachedEntry(cacheMap, key) {
+function getCachedEntry(cacheMap, key, allowStale = false) {
   const entry = cacheMap.get(key);
   if (!entry) return null;
-  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
+  const ageMs = Date.now() - entry.timestamp;
+  const isStale = ageMs > CACHE_TTL_MS;
+  if (isStale && !allowStale) {
     cacheMap.delete(key);
     return null;
   }
-  return entry.payload;
+  return { payload: entry.payload, stale: isStale };
 }
 
-function findCachedPayload(input) {
+function findCachedPayload(input, options = {}) {
   if (!input) return null;
+  const allowStale = Boolean(options.allowStale);
   const key = normalizeKey(input);
-  const inputHit = getCachedEntry(inputCache, key);
+  const inputHit = getCachedEntry(inputCache, key, allowStale);
   if (inputHit) {
-    return { payload: inputHit, key, source: "input" };
+    return { payload: inputHit.payload, stale: inputHit.stale, key, source: "input" };
   }
-  const categoryHit = getCachedEntry(categoryCache, key);
+  const categoryHit = getCachedEntry(categoryCache, key, allowStale);
   if (categoryHit) {
-    return { payload: categoryHit, key, source: "category" };
+    return { payload: categoryHit.payload, stale: categoryHit.stale, key, source: "category" };
   }
   return null;
 }

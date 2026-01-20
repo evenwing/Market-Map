@@ -1,64 +1,70 @@
 import "dotenv/config";
 import crypto from "crypto";
 
-import { analyzeMarket } from "../lib/gemini.js";
-import { renderHtml } from "../lib/render.js";
-import { createTrace } from "../lib/braintrust.js";
-import { withGeminiQueue } from "../lib/queue.js";
+import { analyzeMarket } from "../../lib/gemini.js";
+import { renderHtml } from "../../lib/render.js";
+import { createTrace } from "../../lib/braintrust.js";
+import { withGeminiQueue } from "../../lib/queue.js";
 
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MINUTES || 15) * 60 * 1000;
 const inputCache = new Map();
 const categoryCache = new Map();
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
+  if (req.method !== "GET") {
     res.statusCode = 405;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ error: "Method not allowed" }));
     return;
   }
 
+  const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const input = requestUrl.searchParams.get("input")?.trim() || "";
   const sessionId = crypto.randomUUID();
-  const body = await readBody(req);
-  let input = "";
-
-  try {
-    const parsed = JSON.parse(body || "{}");
-    input = typeof parsed.input === "string" ? parsed.input.trim() : "";
-  } catch (err) {
-    input = "";
-  }
-
   const trace = await createTrace({ input, sessionId });
-  trace.event("input_received", { input });
+  trace.event("input_received", { input, streaming: true });
 
   const fallback = buildApologyPayload();
   const cached = findCachedPayload(input);
+  let closed = false;
+
+  req.on("close", () => {
+    closed = true;
+  });
+
+  startStream(res);
 
   if (!input) {
+    sendStreamEvent(res, closed, "status", { message: "No market signal detected." });
     const html = renderHtml(fallback);
     await trace.end(fallback, html);
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(fallback));
+    sendStreamEvent(res, closed, "final", fallback);
+    res.end();
     return;
   }
 
   if (cached) {
     trace.event("cache_hit", { key: cached.key, source: cached.source });
+    sendStreamEvent(res, closed, "status", { message: "Cache hit. Returning cached results." });
     const html = renderHtml(cached.payload);
     await trace.end(cached.payload, html);
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(cached.payload));
+    sendStreamEvent(res, closed, "final", cached.payload);
+    res.end();
     return;
   }
+
+  sendStreamEvent(res, closed, "status", { message: "Analyzing input..." });
 
   try {
     const queued = await withGeminiQueue(
       () => analyzeMarket(input, (step, data) => trace.event(step, data)),
       {
-        onQueue: (position) => trace.event("queue_wait", { position })
+        onQueue: (position) => {
+          trace.event("queue_wait", { position });
+          sendStreamEvent(res, closed, "status", {
+            message: `Queued for analysis (${position})...`
+          });
+        }
       }
     );
 
@@ -70,34 +76,34 @@ export default async function handler(req, res) {
           source: stale.source,
           stale: stale.stale
         });
+        sendStreamEvent(res, closed, "status", {
+          message: "Queue timeout. Returning cached results."
+        });
         const html = renderHtml(stale.payload);
         await trace.end(stale.payload, html);
-        res.statusCode = 200;
-        res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify(stale.payload));
+        sendStreamEvent(res, closed, "final", stale.payload);
+        res.end();
         return;
       }
       const errorPayload = {
         ...fallback,
-        debug: {
-          message: "Server busy. Please retry."
-        }
+        debug: { message: "Server busy. Please retry." }
       };
       const html = renderHtml(errorPayload);
       await trace.end(errorPayload, html);
-      res.statusCode = 200;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify(errorPayload));
+      sendStreamEvent(res, closed, "debug", { message: errorPayload.debug.message });
+      sendStreamEvent(res, closed, "final", errorPayload);
+      res.end();
       return;
     }
 
     const result = queued.value;
+    sendStreamEvent(res, closed, "status", { message: "Finalizing results..." });
     const html = renderHtml(result);
     await trace.end(result, html);
     storeCachedPayload(input, result);
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(result));
+    sendStreamEvent(res, closed, "final", result);
+    res.end();
   } catch (err) {
     const errorPayload = {
       ...fallback,
@@ -108,10 +114,9 @@ export default async function handler(req, res) {
     const html = renderHtml(errorPayload);
     trace.event("error", { message: err.message });
     await trace.error(err, html);
-
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(errorPayload));
+    sendStreamEvent(res, closed, "debug", { message: err.message || "Unknown error" });
+    sendStreamEvent(res, closed, "final", errorPayload);
+    res.end();
   }
 }
 
@@ -124,6 +129,21 @@ function buildApologyPayload() {
       hint: "Try: CRM, payments, video conferencing."
     }
   };
+}
+
+function startStream(res) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive"
+  });
+  res.write("\n");
+}
+
+function sendStreamEvent(res, closed, event, data) {
+  if (closed || res.writableEnded) return;
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 function normalizeKey(value) {
@@ -165,15 +185,4 @@ function storeCachedPayload(input, payload) {
     const categoryKey = normalizeKey(payload.category);
     categoryCache.set(categoryKey, { payload, timestamp: Date.now() });
   }
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (chunk) => {
-      data += chunk;
-    });
-    req.on("end", () => resolve(data));
-    req.on("error", reject);
-  });
 }
