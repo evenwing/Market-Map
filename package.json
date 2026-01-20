@@ -1,0 +1,12 @@
+{
+  "name": "market-map",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "braintrust": "^2.0.2",
+    "dotenv": "^16.4.5"
+  }
+}
