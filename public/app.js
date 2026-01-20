@@ -52,9 +52,8 @@ function setLoading(isLoading) {
 }
 
 async function runAnalysis(query) {
+  clearPreviousView();
   setLoading(true);
-  status.innerHTML = "";
-  setDebug("");
   try {
     const payload = await analyzeMarket(query);
     if (payload.mode === "apology") {
@@ -74,6 +73,14 @@ async function runAnalysis(query) {
   } finally {
     setLoading(false);
   }
+}
+
+function clearPreviousView() {
+  results.innerHTML = "";
+  results.classList.add("hidden");
+  apology.classList.add("hidden");
+  status.innerHTML = "";
+  setDebug("");
 }
 
 function renderResults(payload) {
