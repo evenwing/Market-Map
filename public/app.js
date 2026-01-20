@@ -10,10 +10,6 @@ const apologyMessage = document.getElementById("apology-message");
 const apologyHint = document.getElementById("apology-hint");
 const categoryTitle = document.getElementById("category-title");
 const rankingBasis = document.getElementById("ranking-basis");
-let eventSource = null;
-let streamDone = false;
-const statusLines = [];
-const MAX_STATUS_LINES = 8;
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -29,7 +25,7 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
-  startStream(query);
+  runAnalysis(query);
 });
 
 async function analyzeMarket(query) {
@@ -50,71 +46,9 @@ function setLoading(isLoading) {
   form.querySelector("button").disabled = isLoading;
 }
 
-function startStream(query) {
-  if (!window.EventSource) {
-    runFallback(query);
-    return;
-  }
-
-  if (eventSource) {
-    eventSource.close();
-    eventSource = null;
-  }
-
-  streamDone = false;
-  clearStatus();
-  setDebug("");
+async function runAnalysis(query) {
   setLoading(true);
-
-  const streamUrl = `/api/analyze/stream?input=${encodeURIComponent(query)}`;
-  const source = new EventSource(streamUrl);
-  eventSource = source;
-
-  source.addEventListener("status", (event) => {
-    appendStatusLine(readMessage(event), "status");
-  });
-
-  source.addEventListener("detail", (event) => {
-    appendStatusLine(readMessage(event), "detail");
-  });
-
-  source.addEventListener("debug", (event) => {
-    const data = readData(event);
-    if (data?.message) {
-      setDebug(data.message);
-    }
-  });
-
-  source.addEventListener("final", (event) => {
-    streamDone = true;
-    const payload = readData(event);
-    if (payload?.mode === "apology") {
-      renderApology(payload);
-    } else if (payload) {
-      renderResults(payload);
-    }
-    source.close();
-    setLoading(false);
-  });
-
-  source.addEventListener("error", () => {
-    if (streamDone) return;
-    source.close();
-    renderApology({
-      apology: {
-        title: "Signal Lost",
-        message: "Sorry - I analyze software markets only.",
-        hint: "Try: CRM, payments, video conferencing."
-      },
-      debug: { message: "Stream connection error." }
-    });
-    setLoading(false);
-  });
-}
-
-async function runFallback(query) {
-  setLoading(true);
-  clearStatus();
+  status.innerHTML = "";
   setDebug("");
   try {
     const payload = await analyzeMarket(query);
@@ -315,42 +249,4 @@ function renderEvidenceText(text) {
   }
 
   return fragment;
-}
-
-function appendStatusLine(message, type) {
-  if (!message) return;
-  statusLines.push({ message, type });
-  if (statusLines.length > MAX_STATUS_LINES) {
-    statusLines.shift();
-  }
-  renderStatusLines();
-}
-
-function renderStatusLines() {
-  status.innerHTML = "";
-  statusLines.forEach((line) => {
-    const item = document.createElement("div");
-    item.className = `status-line ${line.type === "detail" ? "status-detail" : ""}`.trim();
-    item.textContent = line.message;
-    status.appendChild(item);
-  });
-}
-
-function clearStatus() {
-  statusLines.length = 0;
-  status.innerHTML = "";
-}
-
-function readMessage(event) {
-  const data = readData(event);
-  return data?.message || "";
-}
-
-function readData(event) {
-  if (!event?.data) return null;
-  try {
-    return JSON.parse(event.data);
-  } catch (err) {
-    return null;
-  }
 }
