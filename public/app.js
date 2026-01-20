@@ -5,6 +5,7 @@ const debugPanel = document.getElementById("debug-panel");
 const debugMessage = document.getElementById("debug-message");
 const results = document.getElementById("results");
 const apology = document.getElementById("apology");
+const loading = document.getElementById("loading");
 const apologyTitle = document.getElementById("apology-title");
 const apologyMessage = document.getElementById("apology-message");
 const apologyHint = document.getElementById("apology-hint");
@@ -44,6 +45,10 @@ async function analyzeMarket(query) {
 
 function setLoading(isLoading) {
   form.querySelector("button").disabled = isLoading;
+  if (!loading) return;
+  loading.classList.toggle("hidden", !isLoading);
+  loading.setAttribute("aria-busy", isLoading ? "true" : "false");
+  loading.setAttribute("aria-hidden", isLoading ? "false" : "true");
 }
 
 async function runAnalysis(query) {

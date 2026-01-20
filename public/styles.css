@@ -140,6 +140,93 @@ body::after {
   gap: 4px;
 }
 
+.loading {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  background: rgba(5, 5, 5, 0.6);
+  box-shadow: 0 0 18px rgba(0, 255, 132, 0.08);
+}
+
+.loading-orb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, rgba(0, 255, 132, 0.25), transparent 60%),
+    rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(0, 255, 132, 0.22);
+  overflow: hidden;
+}
+
+.loading-orb::before {
+  content: "";
+  position: absolute;
+  inset: -70%;
+  background: conic-gradient(
+    from 0deg,
+    rgba(0, 255, 132, 0),
+    rgba(0, 255, 132, 0.35),
+    rgba(0, 255, 132, 0)
+  );
+  animation: orb-sweep 2.6s linear infinite;
+}
+
+.loading-orb::after {
+  content: "";
+  position: absolute;
+  inset: 10px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 12px rgba(0, 255, 132, 0.15);
+}
+
+.orb-ring {
+  position: absolute;
+  inset: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 255, 132, 0.35);
+  transform-origin: center;
+  animation: orb-ping 2.4s ease-out infinite;
+}
+
+.orb-ring:nth-of-type(2) {
+  animation-delay: 0.8s;
+}
+
+.orb-ring:nth-of-type(3) {
+  animation-delay: 1.6s;
+}
+
+.orb-core {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 10px rgba(0, 255, 132, 0.8);
+}
+
+.loading-title {
+  font-family: "IBM Plex Mono", "Space Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.loading-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .status-line {
   font-size: 12px;
   color: var(--muted);
@@ -328,6 +415,27 @@ body::after {
   }
   100% {
     transform: translateY(220%);
+  }
+}
+
+@keyframes orb-sweep {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes orb-ping {
+  0% {
+    opacity: 0.4;
+    transform: scale(0.5);
+  }
+  60% {
+    opacity: 0;
+    transform: scale(1.4);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.4);
   }
 }
 

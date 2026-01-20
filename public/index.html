@@ -9,9 +9,9 @@
   <body>
     <div class="app">
       <header class="app-header">
-        <div class="brand">MONOLITH // MARKET_CORE</div>
+        <div class="brand">CALIBRE// SOFTWARE_LEADERBOARD</div>
         <div class="header-main">
-          <h1 id="category-title">Market Map</h1>
+          <h1 id="category-title">Category</h1>
           <div class="header-line"></div>
           <div id="ranking-basis" class="ranking-basis">Ranking basis: Evidence-weighted</div>
         </div>
@@ -19,7 +19,7 @@
 
       <section class="input-panel">
         <form id="market-form" class="market-form">
-          <label for="market-input" class="input-label">Market query</label>
+          <label for="market-input" class="input-label">Query</label>
           <div class="input-row">
             <input
               id="market-input"
@@ -33,6 +33,18 @@
           </div>
         </form>
         <div id="status" class="status"></div>
+        <div id="loading" class="loading hidden" role="status" aria-live="polite" aria-busy="false">
+          <div class="loading-orb">
+            <span class="orb-ring"></span>
+            <span class="orb-ring"></span>
+            <span class="orb-ring"></span>
+            <div class="orb-core"></div>
+          </div>
+          <div class="loading-copy">
+            <div class="loading-title">Signal trace active</div>
+            <div class="loading-sub">Compiling top players and evidence</div>
+          </div>
+        </div>
         <div id="debug-panel" class="debug-panel hidden">
           <div class="debug-title">Debug</div>
           <div id="debug-message" class="debug-message"></div>
