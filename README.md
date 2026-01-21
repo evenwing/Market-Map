@@ -37,7 +37,10 @@ Then open `http://localhost:3000`.
 
 ```bash
 GEMINI_API_KEY=your_key
-GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_MODEL=gemini-3-flash-preview
 BRAINTRUST_API_KEY=your_key
 BRAINTRUST_PROJECT=project-name
+CACHE_TTL_MINUTES=15
+GEMINI_REQUEST_TIMEOUT_MS=25000
+GEMINI_TOTAL_TIMEOUT_MS=55000
 ```

@@ -190,6 +190,10 @@ function summarizeEvent(step, data) {
       }
       break;
     }
+    case "gemini_grounding_fallback": {
+      detail.push("Grounding failed. Retrying without grounding.");
+      break;
+    }
     default:
       break;
   }
