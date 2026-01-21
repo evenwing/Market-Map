@@ -78,6 +78,14 @@ body::after {
   margin-top: 12px;
 }
 
+.tagline {
+  margin-top: 10px;
+  font-size: 13px;
+  letter-spacing: 0.6px;
+  color: rgba(230, 230, 230, 0.78);
+  text-transform: uppercase;
+}
+
 .ranking-basis {
   margin-top: 10px;
   font-size: 12px;
