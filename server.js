@@ -426,6 +426,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         res,
         closed
       });
+      await logCitationPages(result, trace);
 
       if (planIdParam) {
         planStore.delete(planIdParam);
@@ -786,6 +787,7 @@ async function handleAnalyze(req, res) {
 
       let result = queued.value;
       result = await verifyAndRepairCitations(result, { trace });
+      await logCitationPages(result, trace);
       if (planId) {
         planStore.delete(planId);
       }
@@ -802,6 +804,7 @@ async function handleAnalyze(req, res) {
     const cached = findCachedPayload(input);
     if (cached) {
       trace.event("cache_hit", { key: cached.key, source: cached.source });
+      await logCitationPages(cached.payload, trace);
       const html = renderHtml(cached.payload);
       await trace.end(cached.payload, html);
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -824,6 +827,7 @@ async function handleAnalyze(req, res) {
           source: stale.source,
           stale: stale.stale
         });
+        await logCitationPages(stale.payload, trace);
         const html = renderHtml(stale.payload);
         await trace.end(stale.payload, html);
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -839,6 +843,7 @@ async function handleAnalyze(req, res) {
     }
 
     const result = queued.value;
+    await logCitationPages(result, trace);
     const html = renderHtml(result);
     await trace.end(result, html);
     storeCachedPayload(input, result);
@@ -1054,6 +1059,108 @@ async function verifyAndRepairCitations(payload, context = {}) {
   });
 
   return payload;
+}
+
+async function logCitationPages(payload, trace) {
+  if (!payload || payload.mode !== "results") return;
+  const pages = await fetchCitationPages(payload, { perCompany: 2 });
+  if (!pages.length) return;
+  if (trace?.addMetadata) {
+    trace.addMetadata({ citation_pages: pages });
+  }
+}
+
+async function fetchCitationPages(payload, options = {}) {
+  const perCompany = Number(options.perCompany || 2);
+  const companies = Array.isArray(payload?.companies) ? payload.companies : [];
+  const requests = [];
+
+  companies.forEach((company) => {
+    const citations = collectCompanyCitations(company, perCompany);
+    citations.forEach((citation) => {
+      requests.push(
+        fetchPageExcerpt(citation.url).then((result) => ({
+          company: citation.company,
+          name: citation.name,
+          url: citation.url,
+          type: citation.type,
+          status: result.status,
+          excerpt: result.excerpt,
+          error: result.error
+        }))
+      );
+    });
+  });
+
+  if (!requests.length) return [];
+  const settled = await Promise.allSettled(requests);
+  return settled
+    .map((entry) => (entry.status === "fulfilled" ? entry.value : null))
+    .filter(Boolean);
+}
+
+function collectCompanyCitations(company, perCompany) {
+  const companyName = safeString(company?.name) || "Company";
+  const seen = new Set();
+  const citations = [];
+
+  const addCitation = (url, name, type) => {
+    if (citations.length >= perCompany) return;
+    const normalized = normalizeCitationUrl(url);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    citations.push({
+      company: companyName,
+      name: safeString(name) || "Source",
+      url: normalized,
+      type
+    });
+  };
+
+  const sources = Array.isArray(company?.sources) ? company.sources : [];
+  sources.forEach((source) => addCitation(source.url, source.name, "source"));
+
+  const metrics = Array.isArray(company?.metrics) ? company.metrics : [];
+  metrics.forEach((metric) =>
+    addCitation(metric.source_url, metric.source_name || metric.label, "metric")
+  );
+
+  return citations;
+}
+
+function normalizeCitationUrl(url) {
+  if (!url || typeof url !== "string") return "";
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    return parsed.toString();
+  } catch (err) {
+    return "";
+  }
+}
+
+async function fetchPageExcerpt(url) {
+  if (!url) return { status: 0, excerpt: "", error: "missing_url" };
+  try {
+    const response = await fetchWithTimeout(url, { method: "GET" }, 8000);
+    const raw = await response.text();
+    const truncated = raw.slice(0, 5000);
+    const excerpt = stripHtml(truncated).slice(0, 500);
+    return { status: response.status, excerpt, error: null };
+  } catch (err) {
+    return { status: 0, excerpt: "", error: err.message || "fetch_failed" };
+  }
+}
+
+function stripHtml(text) {
+  if (!text) return "";
+  return String(text)
+    .replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, " ")
+    .replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, " ")
+    .replace(/<noscript[^>]*>[\\s\\S]*?<\\/noscript>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\\s+/g, " ")
+    .trim();
 }
 
 function collectCitationItems(payload) {
