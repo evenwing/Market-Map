@@ -403,20 +403,19 @@ export default async function handler(req, res) {
         onStatus: (message) => sendStreamEvent(res, closed, "status", { message }),
         onDetail: (message) => sendStreamEvent(res, closed, "detail", { message })
       });
-      await logCitationPages(result, trace);
 
       if (planIdParam) {
         planStore.delete(planIdParam);
       }
 
       const html = renderHtml(result);
-      await trace.end(result, html);
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
       result.trace_parent = traceParent;
       sendStreamEvent(res, closed, "final", result);
       res.end();
+      finalizeTraceAsync(trace, result, html);
       return;
     } catch (err) {
       const errorPayload = {
@@ -444,12 +443,11 @@ export default async function handler(req, res) {
   if (cached) {
     trace.event("cache_hit", { key: cached.key, source: cached.source });
     sendStreamEvent(res, closed, "status", { message: "Cache hit. Returning cached results." });
-    await logCitationPages(cached.payload, trace);
     const html = renderHtml(cached.payload);
-    await trace.end(cached.payload, html);
     cached.payload.trace_parent = traceParent;
     sendStreamEvent(res, closed, "final", cached.payload);
     res.end();
+    finalizeTraceAsync(trace, cached.payload, html);
     return;
   }
 
@@ -489,12 +487,11 @@ export default async function handler(req, res) {
         sendStreamEvent(res, closed, "status", {
           message: "Queue timeout. Returning cached results."
         });
-        await logCitationPages(stale.payload, trace);
         const html = renderHtml(stale.payload);
-        await trace.end(stale.payload, html);
         stale.payload.trace_parent = traceParent;
         sendStreamEvent(res, closed, "final", stale.payload);
         res.end();
+        finalizeTraceAsync(trace, stale.payload, html);
         return;
       }
       const errorPayload = {
@@ -511,14 +508,13 @@ export default async function handler(req, res) {
     }
 
     const result = queued.value;
-    await logCitationPages(result, trace);
     sendStreamEvent(res, closed, "status", { message: "Finalizing results..." });
     const html = renderHtml(result);
-    await trace.end(result, html);
     storeCachedPayload(input, result);
     result.trace_parent = traceParent;
     sendStreamEvent(res, closed, "final", result);
     res.end();
+    finalizeTraceAsync(trace, result, html);
   } catch (err) {
     const errorPayload = {
       ...fallback,
@@ -913,6 +909,22 @@ async function logCitationPages(payload, trace) {
   }
 }
 
+function finalizeTraceAsync(trace, payload, html) {
+  if (!trace || typeof trace.end !== "function") return;
+  void (async () => {
+    try {
+      await logCitationPages(payload, trace);
+    } catch (err) {
+      trace?.event?.("citation_page_error", { message: err.message });
+    }
+    try {
+      await trace.end(payload, html);
+    } catch (err) {
+      // Swallow errors to avoid crashing the request.
+    }
+  })();
+}
+
 async function fetchCitationPages(payload, options = {}) {
   const perCompany = Number(options.perCompany || 2);
   const companies = Array.isArray(payload?.companies) ? payload.companies : [];
@@ -980,6 +992,12 @@ function normalizeCitationUrl(url) {
   } catch (err) {
     return "";
   }
+}
+
+function safeString(value) {
+  if (typeof value === "string") return value.trim();
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
 }
 
 async function fetchPageExcerpt(url) {

@@ -286,19 +286,18 @@ export default async function handler(req, res) {
 
       let result = queued.value;
       result = await verifyAndRepairCitations(result, { trace });
-      await logCitationPages(result, trace);
       result.trace_parent = traceParent;
       if (planId) {
         planStore.delete(planId);
       }
       const html = renderHtml(result);
-      await trace.end(result, html);
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(result));
+      finalizeTraceAsync(trace, result, html);
       return;
     }
 
@@ -306,12 +305,11 @@ export default async function handler(req, res) {
     if (cached) {
       trace.event("cache_hit", { key: cached.key, source: cached.source });
       cached.payload.trace_parent = traceParent;
-      await logCitationPages(cached.payload, trace);
       const html = renderHtml(cached.payload);
-      await trace.end(cached.payload, html);
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(cached.payload));
+      finalizeTraceAsync(trace, cached.payload, html);
       return;
     }
 
@@ -331,12 +329,11 @@ export default async function handler(req, res) {
           stale: stale.stale
         });
         stale.payload.trace_parent = traceParent;
-        await logCitationPages(stale.payload, trace);
         const html = renderHtml(stale.payload);
-        await trace.end(stale.payload, html);
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify(stale.payload));
+        finalizeTraceAsync(trace, stale.payload, html);
         return;
       }
       const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
@@ -350,13 +347,12 @@ export default async function handler(req, res) {
     }
 
     const result = { ...queued.value, trace_parent: traceParent };
-    await logCitationPages(result, trace);
     const html = renderHtml(result);
-    await trace.end(result, html);
     storeCachedPayload(input, result);
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(result));
+    finalizeTraceAsync(trace, result, html);
   } catch (err) {
     const errorPayload = { ...fallback, debug: { message: err.message || "Unknown error" } };
     errorPayload.trace_parent = traceParent;
@@ -607,6 +603,22 @@ async function logCitationPages(payload, trace) {
   }
 }
 
+function finalizeTraceAsync(trace, payload, html) {
+  if (!trace || typeof trace.end !== "function") return;
+  void (async () => {
+    try {
+      await logCitationPages(payload, trace);
+    } catch (err) {
+      trace?.event?.("citation_page_error", { message: err.message });
+    }
+    try {
+      await trace.end(payload, html);
+    } catch (err) {
+      // Swallow errors to avoid crashing the request.
+    }
+  })();
+}
+
 async function fetchCitationPages(payload, options = {}) {
   const perCompany = Number(options.perCompany || 2);
   const companies = Array.isArray(payload?.companies) ? payload.companies : [];
@@ -674,6 +686,12 @@ function normalizeCitationUrl(url) {
   } catch (err) {
     return "";
   }
+}
+
+function safeString(value) {
+  if (typeof value === "string") return value.trim();
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
 }
 
 async function fetchPageExcerpt(url) {
