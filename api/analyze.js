@@ -692,11 +692,11 @@ async function fetchPageExcerpt(url) {
 function stripHtml(text) {
   if (!text) return "";
   return String(text)
-    .replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, " ")
-    .replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, " ")
-    .replace(/<noscript[^>]*>[\\s\\S]*?<\\/noscript>/gi, " ")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, " ")
     .replace(/<[^>]+>/g, " ")
-    .replace(/\\s+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 

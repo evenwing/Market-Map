@@ -465,6 +465,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
   if (cached) {
     trace.event("cache_hit", { key: cached.key, source: cached.source });
     sendStreamEvent(res, closed, "status", { message: "Cache hit. Returning cached results." });
+    await logCitationPages(cached.payload, trace);
     const html = renderHtml(cached.payload);
     await trace.end(cached.payload, html);
     sendStreamEvent(res, closed, "final", cached.payload);
@@ -508,6 +509,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         sendStreamEvent(res, closed, "status", {
           message: "Queue timeout. Returning cached results."
         });
+        await logCitationPages(stale.payload, trace);
         const html = renderHtml(stale.payload);
         await trace.end(stale.payload, html);
         sendStreamEvent(res, closed, "final", stale.payload);
@@ -527,6 +529,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
     }
 
     const result = queued.value;
+    await logCitationPages(result, trace);
     sendStreamEvent(res, closed, "status", { message: "Finalizing results..." });
     const html = renderHtml(result);
     await trace.end(result, html);
@@ -1155,11 +1158,11 @@ async function fetchPageExcerpt(url) {
 function stripHtml(text) {
   if (!text) return "";
   return String(text)
-    .replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, " ")
-    .replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, " ")
-    .replace(/<noscript[^>]*>[\\s\\S]*?<\\/noscript>/gi, " ")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, " ")
     .replace(/<[^>]+>/g, " ")
-    .replace(/\\s+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
