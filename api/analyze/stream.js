@@ -15,6 +15,7 @@ import { withGeminiQueue } from "../../lib/queue.js";
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MINUTES || 15) * 60 * 1000;
 const PLAN_TTL_MS = Number(process.env.PLAN_TTL_MINUTES || 30) * 60 * 1000;
 const TRACE_TTL_MS = Number(process.env.TRACE_TTL_MINUTES || 45) * 60 * 1000;
+const HEARTBEAT_INTERVAL_MS = Number(process.env.SSE_HEARTBEAT_MS || 15000);
 const inputCache = new Map();
 const categoryCache = new Map();
 const planStore = new Map();
@@ -55,12 +56,15 @@ export default async function handler(req, res) {
 
   const fallback = buildApologyPayload();
   let closed = false;
+  const heartbeat = createHeartbeat(res, () => closed, HEARTBEAT_INTERVAL_MS);
 
   req.on("close", () => {
     closed = true;
+    heartbeat.stop();
   });
 
   startStream(res);
+  heartbeat.start();
 
   if (!input && stage !== "execute") {
     sendStreamEvent(res, closed, "status", { message: "No market signal detected." });
@@ -550,6 +554,25 @@ function startStream(res) {
     Connection: "keep-alive"
   });
   res.write("\n");
+}
+
+function createHeartbeat(res, isClosed, intervalMs) {
+  let timer = null;
+  return {
+    start() {
+      if (!intervalMs || intervalMs <= 0 || timer) return;
+      timer = setInterval(() => {
+        if (isClosed() || res.writableEnded) return;
+        // SSE comment ping keeps the connection alive without triggering client handlers.
+        res.write(": ping\n\n");
+      }, intervalMs);
+    },
+    stop() {
+      if (!timer) return;
+      clearInterval(timer);
+      timer = null;
+    }
+  };
 }
 
 function sendStreamEvent(res, closed, event, data) {

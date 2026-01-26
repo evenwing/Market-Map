@@ -8,7 +8,7 @@
   ],
   "functions": {
     "api/config.js": { "maxDuration": 10 },
-    "api/analyze.js": { "maxDuration": 60 },
-    "api/analyze/stream.js": { "maxDuration": 60 }
+    "api/analyze.js": { "maxDuration": 300 },
+    "api/analyze/stream.js": { "maxDuration": 300 }
   }
 }
