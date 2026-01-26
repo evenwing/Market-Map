@@ -20,6 +20,8 @@ const apologyMessage = document.getElementById("apology-message");
 const apologyHint = document.getElementById("apology-hint");
 const categoryTitle = document.getElementById("category-title");
 const rankingBasis = document.getElementById("ranking-basis");
+const rankingJustification = document.getElementById("ranking-justification");
+const rankingJustificationList = document.getElementById("ranking-justification-list");
 const inputPlaceholder = input?.getAttribute("placeholder") || "";
 let placeholderCleared = false;
 let pendingPlanPayload = null;
@@ -493,6 +495,12 @@ function clearPreviousView() {
   results.innerHTML = "";
   results.classList.add("hidden");
   apology.classList.add("hidden");
+  if (rankingJustification) {
+    rankingJustification.classList.add("hidden");
+  }
+  if (rankingJustificationList) {
+    rankingJustificationList.innerHTML = "";
+  }
   if (isMultiTurn()) {
     finalizeStreamMessage();
     setResultsPlaceholderVisible(true);
@@ -579,6 +587,7 @@ function renderResults(payload) {
 
   categoryTitle.textContent = (payload.category || "Market Map").toUpperCase();
   rankingBasis.textContent = `Ranking basis: ${formatRankingBasis(payload.ranking_basis)}`;
+  renderRankingJustification(payload.ranking_justification);
 
   const companies = Array.isArray(payload.companies) ? payload.companies : [];
   companies.forEach((company, index) => {
@@ -636,6 +645,55 @@ function renderResults(payload) {
     const title = payload.category ? `${payload.category} ready.` : "Market map ready.";
     appendAssistantMessage(title);
   }
+}
+
+function renderRankingJustification(justification) {
+  if (!rankingJustification || !rankingJustificationList) return;
+  const items = normalizeJustificationList(justification);
+  rankingJustificationList.innerHTML = "";
+  items.forEach((item) => {
+    const li = document.createElement("li");
+    li.textContent = item;
+    rankingJustificationList.appendChild(li);
+  });
+  rankingJustification.classList.toggle("hidden", items.length === 0);
+}
+
+function normalizeJustificationList(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    const newlineSplit = trimmed
+      .split(/\r?\n+/)
+      .map((line) => line.replace(/^[\s•*-]+/, "").trim())
+      .filter(Boolean);
+    if (newlineSplit.length > 1) return newlineSplit;
+
+    if (/[•·◦]/.test(trimmed)) {
+      const bulletSplit = trimmed
+        .split(/[•·◦]+/)
+        .map((entry) => entry.replace(/^[\s•*-]+/, "").trim())
+        .filter(Boolean);
+      if (bulletSplit.length > 1) return bulletSplit;
+    }
+
+    const numberedMatches = [...trimmed.matchAll(/\b\d+[.)]\s+([\s\S]+?)(?=\s*\b\d+[.)]\s+|$)/g)];
+    if (numberedMatches.length > 1) {
+      return numberedMatches.map((match) => match[1].trim()).filter(Boolean);
+    }
+
+    const inlineSplit = trimmed
+      .split(/\s*;\s*/g)
+      .map((entry) => entry.replace(/^[\s•*-]+/, "").trim())
+      .filter(Boolean);
+    if (inlineSplit.length > 1) return inlineSplit;
+
+    return [trimmed];
+  }
+  return [];
 }
 
 function renderMetric(metric) {
@@ -696,6 +754,12 @@ function renderApology(apologyPayload) {
   setDebug(apologyPayload?.debug?.message || "");
 
   results.classList.add("hidden");
+  if (rankingJustification) {
+    rankingJustification.classList.add("hidden");
+  }
+  if (rankingJustificationList) {
+    rankingJustificationList.innerHTML = "";
+  }
 
   if (isMultiTurn()) {
     finalizeStreamMessage();
