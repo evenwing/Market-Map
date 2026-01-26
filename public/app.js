@@ -691,6 +691,12 @@ function normalizeJustificationList(value) {
       .filter(Boolean);
     if (inlineSplit.length > 1) return inlineSplit;
 
+    const sentenceSplit = trimmed
+      .split(/(?<=[.!?])\s+(?=[A-Z0-9])/g)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    if (sentenceSplit.length > 1) return sentenceSplit.slice(0, 4);
+
     return [trimmed];
   }
   return [];
