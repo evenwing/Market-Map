@@ -1161,20 +1161,36 @@ async function fetchPageExcerpt(url) {
   try {
     const response = await fetchWithTimeout(url, { method: "GET" }, 8000);
     const raw = await response.text();
-    const truncated = raw.slice(0, 5000);
-    const excerpt = stripHtml(truncated).slice(0, 500);
+    const extracted = extractReadableText(raw);
+    const excerpt = extracted.slice(0, 1000).replace(/<[^>]*$/, "").trim();
     return { status: response.status, excerpt, error: null };
   } catch (err) {
     return { status: 0, excerpt: "", error: err.message || "fetch_failed" };
   }
 }
 
-function stripHtml(text) {
-  if (!text) return "";
-  return String(text)
+function extractReadableText(html) {
+  if (!html) return "";
+  let cleaned = String(html)
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
     .replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<template[^>]*>[\s\S]*?<\/template>/gi, " ")
+    .replace(/<form[^>]*>[\s\S]*?<\/form>/gi, " ");
+
+  const mainMatch = cleaned.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+  const articleMatch = cleaned.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+  let candidate = cleaned;
+  if (mainMatch?.[1]) {
+    candidate = mainMatch[1];
+  } else if (articleMatch?.[1]) {
+    candidate = articleMatch[1];
+  }
+
+  candidate = candidate.replace(/<(header|nav|footer|aside)[^>]*>[\s\S]*?<\/\1>/gi, " ");
+
+  return candidate
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
