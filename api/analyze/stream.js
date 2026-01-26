@@ -690,33 +690,11 @@ function decodePlanSnapshot(value) {
   }
 }
 
-function getStoredTrace(conversationId) {
-  if (!conversationId) return null;
-  const entry = traceStore.get(conversationId);
-  if (!entry) return null;
-  const ageMs = Date.now() - entry.timestamp;
-  if (ageMs > TRACE_TTL_MS) {
-    traceStore.delete(conversationId);
-    return null;
-  }
-  entry.timestamp = Date.now();
-  return entry.trace;
-}
-
 async function getOrCreateTraceContext({ input, sessionId, conversationId, parentSpanIds }) {
-  if (!conversationId) {
-    return {
-      trace: await createTrace({ input, sessionId, parentSpanIds }),
-      persistent: false
-    };
-  }
-  const existing = getStoredTrace(conversationId);
-  if (existing) {
-    return { trace: existing, persistent: true };
-  }
-  const trace = await createTrace({ input, sessionId: conversationId, parentSpanIds });
-  traceStore.set(conversationId, { trace, timestamp: Date.now() });
-  return { trace, persistent: true };
+  return {
+    trace: await createTrace({ input, sessionId, parentSpanIds }),
+    persistent: false
+  };
 }
 
 function extractGrounding(grounding) {

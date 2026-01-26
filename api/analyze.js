@@ -475,20 +475,11 @@ function getStoredTrace(conversationId) {
   return entry.trace;
 }
 
-async function getOrCreateTraceContext({ input, sessionId, conversationId, parentSpanIds }) {
-  if (!conversationId) {
-    return {
-      trace: await createTrace({ input, sessionId, parentSpanIds }),
-      persistent: false
-    };
-  }
-  const existing = getStoredTrace(conversationId);
-  if (existing) {
-    return { trace: existing, persistent: true };
-  }
-  const trace = await createTrace({ input, sessionId: conversationId, parentSpanIds });
-  traceStore.set(conversationId, { trace, timestamp: Date.now() });
-  return { trace, persistent: true };
+async function getOrCreateTraceContext({ input, sessionId, parentSpanIds }) {
+  return {
+    trace: await createTrace({ input, sessionId, parentSpanIds }),
+    persistent: false
+  };
 }
 
 function decodeTraceParent(value) {
