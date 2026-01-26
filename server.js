@@ -5,7 +5,14 @@ import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
 
-import { analyzeMarket, warmGemini } from "./lib/gemini.js";
+import {
+  analyzeMarket,
+  warmGemini,
+  planMarket,
+  assessPlanChange,
+  executeMarketPlan,
+  repairCitations
+} from "./lib/gemini.js";
 import { renderHtml } from "./lib/render.js";
 import { createTrace } from "./lib/braintrust.js";
 import { withGeminiQueue } from "./lib/queue.js";
@@ -13,9 +20,14 @@ import { withGeminiQueue } from "./lib/queue.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 const port = process.env.PORT || 3000;
+const uiMode = process.env.UI_MODE === "multi" ? "multi" : "single";
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MINUTES || 15) * 60 * 1000;
+const PLAN_TTL_MS = Number(process.env.PLAN_TTL_MINUTES || 30) * 60 * 1000;
+const TRACE_TTL_MS = Number(process.env.TRACE_TTL_MINUTES || 45) * 60 * 1000;
 const inputCache = new Map();
 const categoryCache = new Map();
+const planStore = new Map();
+const traceStore = new Map();
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -28,6 +40,12 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && req.url === "/api/analyze") {
       await handleAnalyze(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && requestUrl.pathname === "/config.js") {
+      res.writeHead(200, { "Content-Type": "application/javascript", "Cache-Control": "no-store" });
+      res.end(`window.__MM_CONFIG__ = { uiMode: ${JSON.stringify(uiMode)} };`);
       return;
     }
 
@@ -53,13 +71,22 @@ if (process.env.GEMINI_WARMUP !== "false") {
 }
 
 async function handleAnalyzeStream(req, res, requestUrl) {
-  const sessionId = crypto.randomUUID();
   const input = requestUrl.searchParams.get("input")?.trim() || "";
-  const trace = await createTrace({ input, sessionId });
-  trace.event("input_received", { input, streaming: true });
+  const stage = requestUrl.searchParams.get("stage") || "results";
+  const conversationId = requestUrl.searchParams.get("conversation_id") || "";
+  const planIdParam = requestUrl.searchParams.get("plan_id") || "";
+  const sessionId = conversationId || crypto.randomUUID();
+  const traceContext = await getOrCreateTraceContext({ input, sessionId, conversationId });
+  const trace = traceContext.trace;
+  trace.event("input_received", {
+    input,
+    streaming: true,
+    stage,
+    plan_id: planIdParam,
+    conversation_id: conversationId || undefined
+  });
 
   const fallback = buildApologyPayload();
-  const cached = findCachedPayload(input);
   let closed = false;
 
   req.on("close", () => {
@@ -68,14 +95,369 @@ async function handleAnalyzeStream(req, res, requestUrl) {
 
   startStream(res);
 
-  if (!input) {
+  if (!input && stage !== "execute") {
     sendStreamEvent(res, closed, "status", { message: "No market signal detected." });
     const html = renderHtml(fallback);
     await trace.end(fallback, html);
+    if (traceContext.persistent) {
+      traceStore.delete(conversationId);
+    }
     sendStreamEvent(res, closed, "final", fallback);
     res.end();
     return;
   }
+
+  if (stage === "plan") {
+    sendStreamEvent(res, closed, "status", { message: "Drafting analysis plan..." });
+    const planSpan = trace.startSpan({
+      name: "plan.generate",
+      type: "task",
+      spanAttributes: { stage: "initial", streaming: true },
+      event: {
+        input: { input },
+        metadata: { stage: "plan", plan_id: planIdParam || "" }
+      }
+    });
+    try {
+      const queued = await withGeminiQueue(
+        () =>
+          planMarket(
+            input,
+            (step, data) => {
+              trace.event(step, data);
+              const messages = summarizeEvent(step, data);
+              messages.status.forEach((message) =>
+                sendStreamEvent(res, closed, "status", { message })
+              );
+              messages.detail.forEach((message) =>
+                sendStreamEvent(res, closed, "detail", { message })
+              );
+            },
+            { useTools: true }
+          ),
+        {
+          onQueue: (position) => {
+            trace.event("queue_wait", { position });
+            sendStreamEvent(res, closed, "status", {
+              message: `Queued for planning (${position})...`
+            });
+          }
+        }
+      );
+
+      if (queued.status === "timeout") {
+        const errorPayload = {
+          ...fallback,
+          debug: { message: "Server busy. Please retry." }
+        };
+        if (traceContext.persistent) {
+          traceStore.delete(conversationId);
+        }
+        const html = renderHtml(errorPayload);
+        await trace.end(errorPayload, html);
+        sendStreamEvent(res, closed, "debug", { message: errorPayload.debug.message });
+        sendStreamEvent(res, closed, "final", errorPayload);
+        res.end();
+        return;
+      }
+
+      const planId = planIdParam || crypto.randomUUID();
+      const planPayload = {
+        ...queued.value,
+        plan_id: planId
+      };
+      storePlan(planId, queued.value, input);
+      planSpan?.log?.({
+        output: planPayload,
+        metadata: { plan_id: planId, stage: "initial" }
+      });
+      trace.event("plan_payload", {
+        plan_id: planId,
+        category: planPayload.category,
+        ranking_basis: planPayload.ranking_basis
+      });
+      if (!traceContext.persistent) {
+        const html = renderHtml(fallback);
+        await trace.end(planPayload, html);
+      }
+      sendStreamEvent(res, closed, "final", planPayload);
+      res.end();
+      return;
+    } catch (err) {
+      const errorPayload = {
+        ...fallback,
+        debug: {
+          message: err.message || "Unknown error"
+        }
+      };
+      if (traceContext.persistent) {
+        traceStore.delete(conversationId);
+      }
+      const html = renderHtml(errorPayload);
+      trace.event("error", { message: err.message });
+      await trace.error(err, html);
+      sendStreamEvent(res, closed, "debug", { message: err.message || "Unknown error" });
+      sendStreamEvent(res, closed, "final", errorPayload);
+      res.end();
+      return;
+    } finally {
+      planSpan?.end?.();
+    }
+  }
+
+  if (stage === "execute") {
+    const planEntry = getPlan(planIdParam);
+    if (!planEntry) {
+      const errorPayload = {
+        ...fallback,
+        debug: { message: "Plan expired. Please submit a new query." }
+      };
+      const html = renderHtml(errorPayload);
+      await trace.end(errorPayload, html);
+      if (traceContext.persistent) {
+        traceStore.delete(conversationId);
+      }
+      sendStreamEvent(res, closed, "final", errorPayload);
+      res.end();
+      return;
+    }
+
+    sendStreamEvent(res, closed, "status", { message: "Reviewing plan updates..." });
+    let review = null;
+    try {
+      const queuedReview = await withGeminiQueue(
+        () =>
+          assessPlanChange(
+            input,
+            (step, data) => {
+              trace.event(step, data);
+            },
+            {
+              useTools: false,
+              context: {
+                plan: planEntry.plan,
+                baseInput: planEntry.baseInput,
+                clarification: input
+              }
+            }
+          ),
+        {
+          onQueue: (position) => {
+            trace.event("queue_wait", { position, stage: "plan_review" });
+            sendStreamEvent(res, closed, "status", {
+              message: `Queued for plan review (${position})...`
+            });
+          }
+        }
+      );
+
+      if (queuedReview.status === "timeout") {
+        trace.event("plan_review_timeout", { message: "Queue timeout" });
+        sendStreamEvent(res, closed, "detail", {
+          message: "Plan review skipped due to queue load."
+        });
+      } else {
+        review = queuedReview.value;
+        trace.event("plan_review", review);
+      }
+    } catch (err) {
+      trace.event("plan_review_error", { message: err.message });
+      sendStreamEvent(res, closed, "detail", {
+        message: "Plan review failed. Proceeding with existing plan."
+      });
+    }
+
+    if (review?.mode === "replan") {
+      sendStreamEvent(res, closed, "status", { message: "Revising plan..." });
+      const replanInput = buildReplanInput(planEntry.baseInput, input);
+      const planSpan = trace.startSpan({
+        name: "plan.generate",
+        type: "task",
+        spanAttributes: { stage: "replan", streaming: true },
+        event: {
+          input: { input: replanInput },
+          metadata: { stage: "replan", plan_id: planIdParam || "" }
+        }
+      });
+      try {
+        const queuedPlan = await withGeminiQueue(
+          () =>
+            planMarket(
+              replanInput,
+              (step, data) => {
+                trace.event(step, data);
+                const messages = summarizeEvent(step, data);
+                messages.status.forEach((message) =>
+                  sendStreamEvent(res, closed, "status", { message })
+                );
+                messages.detail.forEach((message) =>
+                  sendStreamEvent(res, closed, "detail", { message })
+                );
+              },
+              { useTools: true }
+            ),
+          {
+            onQueue: (position) => {
+              trace.event("queue_wait", { position, stage: "replan" });
+              sendStreamEvent(res, closed, "status", {
+                message: `Queued for replanning (${position})...`
+              });
+            }
+          }
+        );
+
+        if (queuedPlan.status === "timeout") {
+          const errorPayload = {
+            ...fallback,
+            debug: { message: "Server busy. Please retry." }
+          };
+          const html = renderHtml(errorPayload);
+          await trace.end(errorPayload, html);
+          if (traceContext.persistent) {
+            traceStore.delete(conversationId);
+          }
+          sendStreamEvent(res, closed, "debug", { message: errorPayload.debug.message });
+          sendStreamEvent(res, closed, "final", errorPayload);
+          res.end();
+          return;
+        }
+
+        const planId = planIdParam || crypto.randomUUID();
+        const planPayload = {
+          ...queuedPlan.value,
+          plan_id: planId
+        };
+        storePlan(planId, queuedPlan.value, replanInput);
+        planSpan?.log?.({
+          output: planPayload,
+          metadata: { plan_id: planId, stage: "replan", reason: review?.reason || "" }
+        });
+        trace.event("plan_payload", {
+          plan_id: planId,
+          category: planPayload.category,
+          ranking_basis: planPayload.ranking_basis
+        });
+        if (!traceContext.persistent) {
+          const html = renderHtml(fallback);
+          await trace.end(planPayload, html);
+        }
+        sendStreamEvent(res, closed, "final", planPayload);
+        res.end();
+        return;
+      } catch (err) {
+        const errorPayload = {
+          ...fallback,
+          debug: {
+            message: err.message || "Unknown error"
+          }
+        };
+        const html = renderHtml(errorPayload);
+        trace.event("error", { message: err.message });
+        await trace.error(err, html);
+        if (traceContext.persistent) {
+          traceStore.delete(conversationId);
+        }
+        sendStreamEvent(res, closed, "debug", { message: err.message || "Unknown error" });
+        sendStreamEvent(res, closed, "final", errorPayload);
+        res.end();
+        return;
+      } finally {
+        planSpan?.end?.();
+      }
+    }
+
+    sendStreamEvent(res, closed, "status", { message: "Executing plan..." });
+    try {
+      const queued = await withGeminiQueue(
+        () =>
+          executeMarketPlan(
+            input,
+            (step, data) => {
+              trace.event(step, data);
+              const messages = summarizeEvent(step, data);
+              messages.status.forEach((message) =>
+                sendStreamEvent(res, closed, "status", { message })
+              );
+              messages.detail.forEach((message) =>
+                sendStreamEvent(res, closed, "detail", { message })
+              );
+            },
+            {
+              useTools: true,
+              context: {
+                plan: planEntry.plan,
+                baseInput: planEntry.baseInput,
+                clarification: input
+              }
+            }
+          ),
+        {
+          onQueue: (position) => {
+            trace.event("queue_wait", { position });
+            sendStreamEvent(res, closed, "status", {
+              message: `Queued for execution (${position})...`
+            });
+          }
+        }
+      );
+
+      if (queued.status === "timeout") {
+        const errorPayload = {
+          ...fallback,
+          debug: { message: "Server busy. Please retry." }
+        };
+        const html = renderHtml(errorPayload);
+        await trace.end(errorPayload, html);
+        if (traceContext.persistent) {
+          traceStore.delete(conversationId);
+        }
+        sendStreamEvent(res, closed, "debug", { message: errorPayload.debug.message });
+        sendStreamEvent(res, closed, "final", errorPayload);
+        res.end();
+        return;
+      }
+
+      let result = queued.value;
+      sendStreamEvent(res, closed, "status", { message: "Checking citations..." });
+      result = await verifyAndRepairCitations(result, {
+        trace,
+        res,
+        closed
+      });
+
+      if (planIdParam) {
+        planStore.delete(planIdParam);
+      }
+
+      const html = renderHtml(result);
+      await trace.end(result, html);
+      if (traceContext.persistent) {
+        traceStore.delete(conversationId);
+      }
+      sendStreamEvent(res, closed, "final", result);
+      res.end();
+      return;
+    } catch (err) {
+      const errorPayload = {
+        ...fallback,
+        debug: {
+          message: err.message || "Unknown error"
+        }
+      };
+      const html = renderHtml(errorPayload);
+      trace.event("error", { message: err.message });
+      await trace.error(err, html);
+      if (traceContext.persistent) {
+        traceStore.delete(conversationId);
+      }
+      sendStreamEvent(res, closed, "debug", { message: err.message || "Unknown error" });
+      sendStreamEvent(res, closed, "final", errorPayload);
+      res.end();
+      return;
+    }
+  }
+
+  const cached = findCachedPayload(input);
 
   if (cached) {
     trace.event("cache_hit", { key: cached.key, source: cached.source });
@@ -158,6 +540,9 @@ async function handleAnalyzeStream(req, res, requestUrl) {
     const html = renderHtml(errorPayload);
     trace.event("error", { message: err.message });
     await trace.error(err, html);
+    if (traceContext.persistent) {
+      traceStore.delete(conversationId);
+    }
     sendStreamEvent(res, closed, "debug", { message: err.message || "Unknown error" });
     sendStreamEvent(res, closed, "final", errorPayload);
     res.end();
@@ -165,41 +550,261 @@ async function handleAnalyzeStream(req, res, requestUrl) {
 }
 
 async function handleAnalyze(req, res) {
-  const sessionId = crypto.randomUUID();
   const body = await readBody(req);
   let input = "";
+  let stage = "results";
+  let planId = "";
+  let conversationId = "";
 
   try {
     const parsed = JSON.parse(body || "{}");
     input = typeof parsed.input === "string" ? parsed.input.trim() : "";
+    stage = typeof parsed.stage === "string" ? parsed.stage : "results";
+    planId = typeof parsed.plan_id === "string" ? parsed.plan_id : "";
+    conversationId = typeof parsed.conversation_id === "string" ? parsed.conversation_id : "";
   } catch (err) {
     input = "";
   }
 
-  const trace = await createTrace({ input, sessionId });
-  trace.event("input_received", { input });
+  const sessionId = conversationId || crypto.randomUUID();
+  const traceContext = await getOrCreateTraceContext({ input, sessionId, conversationId });
+  const trace = traceContext.trace;
+  trace.event("input_received", {
+    input,
+    stage,
+    plan_id: planId,
+    conversation_id: conversationId || undefined
+  });
 
   const fallback = buildApologyPayload();
-  const cached = findCachedPayload(input);
 
-  if (!input) {
+  if (!input && stage !== "execute") {
     const html = renderHtml(fallback);
     await trace.end(fallback, html);
+    if (traceContext.persistent) {
+      traceStore.delete(conversationId);
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(fallback));
     return;
   }
 
-  if (cached) {
-    trace.event("cache_hit", { key: cached.key, source: cached.source });
-    const html = renderHtml(cached.payload);
-    await trace.end(cached.payload, html);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(cached.payload));
-    return;
-  }
-
   try {
+    if (stage === "plan") {
+      const planSpan = trace.startSpan({
+        name: "plan.generate",
+        type: "task",
+        spanAttributes: { stage: "initial", streaming: false },
+        event: {
+          input: { input },
+          metadata: { stage: "plan", plan_id: planId || "" }
+        }
+      });
+      try {
+        const queued = await withGeminiQueue(
+          () =>
+            planMarket(input, (step, data) => trace.event(step, data), {
+              useTools: true
+            }),
+          {
+            onQueue: (position) => trace.event("queue_wait", { position })
+          }
+        );
+
+        if (queued.status === "timeout") {
+          const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
+          if (traceContext.persistent) {
+            traceStore.delete(conversationId);
+          }
+          const html = renderHtml(errorPayload);
+          await trace.end(errorPayload, html);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(errorPayload));
+          return;
+        }
+
+        const derivedPlanId = planId || crypto.randomUUID();
+        const planPayload = {
+          ...queued.value,
+          plan_id: derivedPlanId
+        };
+        storePlan(derivedPlanId, queued.value, input);
+        planSpan?.log?.({
+          output: planPayload,
+          metadata: { plan_id: derivedPlanId, stage: "initial" }
+        });
+        trace.event("plan_payload", {
+          plan_id: derivedPlanId,
+          category: planPayload.category,
+          ranking_basis: planPayload.ranking_basis
+        });
+        if (!traceContext.persistent) {
+          const html = renderHtml(fallback);
+          await trace.end(planPayload, html);
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(planPayload));
+        return;
+      } finally {
+        planSpan?.end?.();
+      }
+    }
+
+    if (stage === "execute") {
+      const planEntry = getPlan(planId);
+      if (!planEntry) {
+        const errorPayload = {
+          ...fallback,
+          debug: { message: "Plan expired. Please submit a new query." }
+        };
+        const html = renderHtml(errorPayload);
+        await trace.end(errorPayload, html);
+        if (traceContext.persistent) {
+          traceStore.delete(conversationId);
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(errorPayload));
+        return;
+      }
+
+      let review = null;
+      try {
+        const queuedReview = await withGeminiQueue(
+          () =>
+            assessPlanChange(input, (step, data) => trace.event(step, data), {
+              useTools: false,
+              context: {
+                plan: planEntry.plan,
+                baseInput: planEntry.baseInput,
+                clarification: input
+              }
+            }),
+          {
+            onQueue: (position) => trace.event("queue_wait", { position, stage: "plan_review" })
+          }
+        );
+
+        if (queuedReview.status === "timeout") {
+          trace.event("plan_review_timeout", { message: "Queue timeout" });
+        } else {
+          review = queuedReview.value;
+          trace.event("plan_review", review);
+        }
+      } catch (err) {
+        trace.event("plan_review_error", { message: err.message });
+      }
+
+      if (review?.mode === "replan") {
+        const replanInput = buildReplanInput(planEntry.baseInput, input);
+        const planSpan = trace.startSpan({
+          name: "plan.generate",
+          type: "task",
+          spanAttributes: { stage: "replan", streaming: false },
+          event: {
+            input: { input: replanInput },
+            metadata: { stage: "replan", plan_id: planId || "" }
+          }
+        });
+        try {
+          const queuedPlan = await withGeminiQueue(
+            () =>
+              planMarket(replanInput, (step, data) => trace.event(step, data), { useTools: true }),
+            {
+              onQueue: (position) => trace.event("queue_wait", { position, stage: "replan" })
+            }
+          );
+
+          if (queuedPlan.status === "timeout") {
+            const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
+            if (traceContext.persistent) {
+              traceStore.delete(conversationId);
+            }
+            const html = renderHtml(errorPayload);
+            await trace.end(errorPayload, html);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(errorPayload));
+            return;
+          }
+
+          const updatedPlanId = planId || crypto.randomUUID();
+          const planPayload = {
+            ...queuedPlan.value,
+            plan_id: updatedPlanId
+          };
+          storePlan(updatedPlanId, queuedPlan.value, replanInput);
+          planSpan?.log?.({
+            output: planPayload,
+            metadata: { plan_id: updatedPlanId, stage: "replan", reason: review?.reason || "" }
+          });
+          trace.event("plan_payload", {
+            plan_id: updatedPlanId,
+            category: planPayload.category,
+            ranking_basis: planPayload.ranking_basis
+          });
+          if (!traceContext.persistent) {
+            const html = renderHtml(fallback);
+            await trace.end(planPayload, html);
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(planPayload));
+          return;
+        } finally {
+          planSpan?.end?.();
+        }
+      }
+
+      const queued = await withGeminiQueue(
+        () =>
+          executeMarketPlan(input, (step, data) => trace.event(step, data), {
+            useTools: true,
+            context: {
+              plan: planEntry.plan,
+              baseInput: planEntry.baseInput,
+              clarification: input
+            }
+          }),
+        {
+          onQueue: (position) => trace.event("queue_wait", { position })
+        }
+      );
+
+      if (queued.status === "timeout") {
+        const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
+        const html = renderHtml(errorPayload);
+        await trace.end(errorPayload, html);
+        if (traceContext.persistent) {
+          traceStore.delete(conversationId);
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(errorPayload));
+        return;
+      }
+
+      let result = queued.value;
+      result = await verifyAndRepairCitations(result, { trace });
+      if (planId) {
+        planStore.delete(planId);
+      }
+      const html = renderHtml(result);
+      await trace.end(result, html);
+      if (traceContext.persistent) {
+        traceStore.delete(conversationId);
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    const cached = findCachedPayload(input);
+    if (cached) {
+      trace.event("cache_hit", { key: cached.key, source: cached.source });
+      const html = renderHtml(cached.payload);
+      await trace.end(cached.payload, html);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(cached.payload));
+      return;
+    }
+
     const queued = await withGeminiQueue(
       () => analyzeMarket(input, (step, data) => trace.event(step, data)),
       {
@@ -221,12 +826,7 @@ async function handleAnalyze(req, res) {
         res.end(JSON.stringify(stale.payload));
         return;
       }
-      const errorPayload = {
-        ...fallback,
-        debug: {
-          message: "Server busy. Please retry."
-        }
-      };
+      const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
       const html = renderHtml(errorPayload);
       await trace.end(errorPayload, html);
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -237,21 +837,17 @@ async function handleAnalyze(req, res) {
     const result = queued.value;
     const html = renderHtml(result);
     await trace.end(result, html);
-
     storeCachedPayload(input, result);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(result));
   } catch (err) {
-    const errorPayload = {
-      ...fallback,
-      debug: {
-        message: err.message || "Unknown error"
-      }
-    };
+    const errorPayload = { ...fallback, debug: { message: err.message || "Unknown error" } };
     const html = renderHtml(errorPayload);
     trace.event("error", { message: err.message });
     await trace.error(err, html);
-
+    if (traceContext.persistent) {
+      traceStore.delete(conversationId);
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(errorPayload));
   }
@@ -359,6 +955,258 @@ function summarizeEvent(step, data) {
   }
 
   return { status, detail };
+}
+
+async function verifyAndRepairCitations(payload, context = {}) {
+  if (!payload || payload.mode !== "results") return payload;
+  const items = collectCitationItems(payload);
+  if (!items.length) return payload;
+
+  const { res, closed, trace } = context;
+  const sendDetail = (message) => {
+    if (res) {
+      sendStreamEvent(res, closed, "detail", { message });
+    }
+  };
+  const sendStatus = (message) => {
+    if (res) {
+      sendStreamEvent(res, closed, "status", { message });
+    }
+  };
+
+  sendStatus("Verifying citations...");
+  const { invalidItems } = await checkCitations(items, { sendDetail, trace });
+  if (!invalidItems.length) {
+    sendDetail("Citations look good.");
+    return payload;
+  }
+
+  const replacedUrls = new Set();
+  const grouped = groupInvalidByCompany(invalidItems);
+  for (const group of grouped) {
+    sendStatus(`Repairing citations for ${group.companyName}...`);
+    trace?.event("citation_repair_start", {
+      company: group.companyName,
+      count: group.items.length
+    });
+
+    let repair = null;
+    try {
+      repair = await repairCitations(
+        "repair citations",
+        (step, data) => {
+          trace?.event(step, data);
+        },
+        {
+          useTools: true,
+          context: {
+            category: payload.category,
+            company: group.companyName,
+            items: group.items.map((item) => ({
+              type: item.type,
+              label: item.label,
+              url: item.url
+            }))
+          }
+        }
+      );
+    } catch (err) {
+      trace?.event("citation_repair_error", { message: err.message });
+      sendDetail(`Citation repair failed for ${group.companyName}.`);
+      continue;
+    }
+
+    const replacements = Array.isArray(repair?.replacements) ? repair.replacements : [];
+    if (!replacements.length) {
+      sendDetail(`No replacement citations found for ${group.companyName}.`);
+      continue;
+    }
+
+    for (const replacement of replacements) {
+      const badUrl = replacement.bad_url;
+      const newSource = replacement.source || {};
+      if (!badUrl || !newSource.url) continue;
+      const check = await checkUrl(newSource.url);
+      if (!check.ok) {
+        sendDetail(`Replacement failed (${formatUrl(newSource.url)}).`);
+        continue;
+      }
+      const affected = group.items.filter((item) => item.url === badUrl);
+      if (!affected.length) continue;
+      affected.forEach((item) => applyReplacement(payload, item, newSource));
+      replacedUrls.add(badUrl);
+      sendDetail(
+        `Replaced citation for ${group.companyName}: ${formatUrl(badUrl)} → ${formatUrl(
+          newSource.url
+        )}`
+      );
+    }
+  }
+
+  invalidItems.forEach((item) => {
+    if (replacedUrls.has(item.url)) return;
+    removeInvalidCitation(payload, item);
+    sendDetail(`Removed invalid citation for ${item.companyName}: ${formatUrl(item.url)}`);
+  });
+
+  return payload;
+}
+
+function collectCitationItems(payload) {
+  const items = [];
+  const companies = Array.isArray(payload?.companies) ? payload.companies : [];
+  companies.forEach((company, companyIndex) => {
+    const companyName = company?.name || `Company ${companyIndex + 1}`;
+    const metrics = Array.isArray(company?.metrics) ? company.metrics : [];
+    metrics.forEach((metric, metricIndex) => {
+      if (!metric?.source_url) return;
+      items.push({
+        type: "metric",
+        companyIndex,
+        metricIndex,
+        companyName,
+        label: metric.label || "Metric",
+        url: metric.source_url,
+        sourceName: metric.source_name || "Source"
+      });
+    });
+    const sources = Array.isArray(company?.sources) ? company.sources : [];
+    sources.forEach((source, sourceIndex) => {
+      if (!source?.url) return;
+      items.push({
+        type: "source",
+        companyIndex,
+        sourceIndex,
+        companyName,
+        label: source.name || "Source",
+        url: source.url
+      });
+    });
+  });
+  return items;
+}
+
+async function checkCitations(items, context = {}) {
+  const { sendDetail, trace } = context;
+  const urlMap = new Map();
+  items.forEach((item) => {
+    if (!item.url) return;
+    if (!urlMap.has(item.url)) urlMap.set(item.url, []);
+    urlMap.get(item.url).push(item);
+  });
+
+  const invalidItems = [];
+  for (const [url, grouped] of urlMap.entries()) {
+    const check = await checkUrl(url);
+    trace?.event("citation_check", { url, ok: check.ok, status: check.status });
+    if (check.error) {
+      sendDetail?.(`Citation check unavailable: ${formatUrl(url)}`);
+      continue;
+    }
+    if (check.ok) {
+      sendDetail?.(`Citation OK: ${formatUrl(url)}`);
+    } else {
+      sendDetail?.(`Citation 404: ${formatUrl(url)}`);
+      invalidItems.push(...grouped);
+    }
+  }
+
+  return { invalidItems };
+}
+
+function groupInvalidByCompany(items) {
+  const map = new Map();
+  items.forEach((item) => {
+    const key = item.companyIndex;
+    if (!map.has(key)) {
+      map.set(key, { companyIndex: key, companyName: item.companyName, items: [] });
+    }
+    map.get(key).items.push(item);
+  });
+  return Array.from(map.values());
+}
+
+function applyReplacement(payload, item, newSource) {
+  const company = payload?.companies?.[item.companyIndex];
+  if (!company) return;
+  const safeNewSource = {
+    name: newSource.name || "Source",
+    url: newSource.url
+  };
+
+  if (item.type === "metric") {
+    const metric = company.metrics?.[item.metricIndex];
+    if (metric) {
+      metric.source_url = safeNewSource.url;
+      metric.source_name = safeNewSource.name;
+    }
+  }
+
+  if (item.type === "source") {
+    const source = company.sources?.[item.sourceIndex];
+    if (source) {
+      source.url = safeNewSource.url;
+      source.name = safeNewSource.name;
+    }
+  }
+
+  if (Array.isArray(company.sources)) {
+    const existing = company.sources.find((src) => src.url === safeNewSource.url);
+    if (!existing) {
+      company.sources.push({ ...safeNewSource });
+    }
+    company.sources = company.sources.filter((src) => src.url);
+  }
+}
+
+function removeInvalidCitation(payload, item) {
+  const company = payload?.companies?.[item.companyIndex];
+  if (!company) return;
+  if (item.type === "metric") {
+    const metric = company.metrics?.[item.metricIndex];
+    if (metric) {
+      metric.source_url = "";
+      metric.source_name = "";
+    }
+    return;
+  }
+  if (item.type === "source" && Array.isArray(company.sources)) {
+    company.sources = company.sources.filter((source, index) => index !== item.sourceIndex);
+  }
+}
+
+async function checkUrl(url) {
+  try {
+    const head = await fetchWithTimeout(url, { method: "HEAD" }, 8000);
+    if (head.status === 405 || head.status === 403) {
+      const getRes = await fetchWithTimeout(url, { method: "GET" }, 8000);
+      if (getRes.status === 404) return { ok: false, status: 404 };
+      return { ok: true, status: getRes.status };
+    }
+    if (head.status === 404) return { ok: false, status: 404 };
+    return { ok: true, status: head.status };
+  } catch (err) {
+    return { ok: true, status: 0, error: true };
+  }
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function formatUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.replace(/^www\./, "");
+  } catch (err) {
+    return url;
+  }
 }
 
 function extractGrounding(grounding) {
@@ -491,6 +1339,60 @@ function storeCachedPayload(input, payload) {
     const categoryKey = normalizeKey(payload.category);
     categoryCache.set(categoryKey, { payload, timestamp: Date.now() });
   }
+}
+
+function storePlan(planId, plan, baseInput) {
+  if (!planId || !plan) return;
+  planStore.set(planId, { plan, baseInput, timestamp: Date.now() });
+}
+
+function getStoredTrace(conversationId) {
+  if (!conversationId) return null;
+  const entry = traceStore.get(conversationId);
+  if (!entry) return null;
+  const ageMs = Date.now() - entry.timestamp;
+  if (ageMs > TRACE_TTL_MS) {
+    traceStore.delete(conversationId);
+    return null;
+  }
+  entry.timestamp = Date.now();
+  return entry.trace;
+}
+
+async function getOrCreateTraceContext({ input, sessionId, conversationId }) {
+  if (!conversationId) {
+    return {
+      trace: await createTrace({ input, sessionId }),
+      persistent: false
+    };
+  }
+  const existing = getStoredTrace(conversationId);
+  if (existing) {
+    return { trace: existing, persistent: true };
+  }
+  const trace = await createTrace({ input, sessionId: conversationId });
+  traceStore.set(conversationId, { trace, timestamp: Date.now() });
+  return { trace, persistent: true };
+}
+
+function buildReplanInput(baseInput, clarification) {
+  const base = (baseInput || "").trim();
+  const detail = (clarification || "").trim();
+  if (!detail) return base;
+  if (!base) return detail;
+  return `${base}\nClarification: ${detail}`;
+}
+
+function getPlan(planId) {
+  if (!planId) return null;
+  const entry = planStore.get(planId);
+  if (!entry) return null;
+  const ageMs = Date.now() - entry.timestamp;
+  if (ageMs > PLAN_TTL_MS) {
+    planStore.delete(planId);
+    return null;
+  }
+  return entry;
 }
 
 function readBody(req) {

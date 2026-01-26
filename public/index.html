@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div class="app">
+    <div class="app" data-ui-mode="single">
       <header class="app-header">
         <div class="brand">CALIBRE// SOFTWARE_LEADERBOARD</div>
         <div class="header-main">
@@ -18,57 +18,109 @@
         </div>
       </header>
 
-      <section class="input-panel">
-        <form id="market-form" class="market-form">
-          <label for="market-input" class="input-label">Query</label>
-          <div class="input-row">
-            <input
-              id="market-input"
-              name="market"
-              type="text"
-              placeholder="Payments, CRM, video conferencing"
-              autocomplete="off"
-              required
-            />
-            <button type="submit">Analyze</button>
-          </div>
-        </form>
-        <div id="status" class="status"></div>
-        <div id="loading" class="loading hidden" role="status" aria-live="polite" aria-busy="false">
-          <div class="loading-orb">
-            <span class="orb-ring"></span>
-            <span class="orb-ring"></span>
-            <span class="orb-ring"></span>
-            <div class="orb-core"></div>
-          </div>
-          <div class="loading-copy">
-            <div class="loading-title">Signal trace active</div>
-            <div class="loading-sub">Compiling top players and evidence</div>
-          </div>
-        </div>
-        <div id="debug-panel" class="debug-panel hidden">
-          <div class="debug-title">Debug</div>
-          <div id="debug-message" class="debug-message"></div>
-        </div>
-      </section>
-
-      <main class="content">
-        <section id="results" class="columns hidden"></section>
-        <section id="apology" class="apology hidden">
-          <div class="scanline"></div>
-          <div class="apology-inner">
-            <div id="apology-title" class="apology-title">Signal Lost</div>
-            <div id="apology-message" class="apology-message">
-              Sorry - I analyze software markets only.
+      <div class="layout">
+        <section class="chat-column">
+          <div class="qa-panel">
+            <div id="qa-hero" class="qa-hero">
+              <div class="qa-kicker">Let&#39;s dive in</div>
+              <div class="qa-title">What do you want to know?</div>
+              <div class="qa-subtitle">Ask for a market snapshot and I&#39;ll surface leaders, metrics, and sources.</div>
             </div>
-            <div id="apology-hint" class="apology-hint">
-              Try entering a market category: CRM, payments, video conferencing, etc.
-            </div>
+            <section id="chat-rail" class="chat-rail" aria-live="polite" aria-label="Conversation"></section>
+            <section class="input-panel">
+              <form id="market-form" class="market-form">
+                <div class="composer">
+                  <div class="input-row">
+                    <input
+                      id="market-input"
+                      name="market"
+                      type="text"
+                      placeholder="Who leads the CRM market?"
+                      autocomplete="off"
+                      aria-label="Market query"
+                      required
+                    />
+                    <button type="submit" class="submit-button" aria-label="Submit">
+                      <span class="submit-icon" aria-hidden="true">&uarr;</span>
+                    </button>
+                  </div>
+                </div>
+              </form>
+              <div class="quick-picks" aria-label="Suggested markets">
+                <button type="button" class="chip" data-query="Payments">Payments leaders</button>
+                <button type="button" class="chip" data-query="Devops">Devops market snapshot</button>
+                <button type="button" class="chip" data-query="Video conferencing">Video conferencing top players</button>
+              </div>
+              <div id="status" class="status"></div>
+              <div id="loading" class="loading hidden" role="status" aria-live="polite" aria-busy="false">
+                <div class="loading-orb">
+                  <span class="orb-ring"></span>
+                  <span class="orb-ring"></span>
+                  <span class="orb-ring"></span>
+                  <div class="orb-core"></div>
+                </div>
+                <div class="loading-copy">
+                  <div class="loading-title">Signal trace active</div>
+                  <div class="loading-sub">Compiling top players and evidence</div>
+                </div>
+              </div>
+              <div id="debug-panel" class="debug-panel hidden">
+                <div class="debug-title">Debug</div>
+                <div id="debug-message" class="debug-message"></div>
+              </div>
+            </section>
           </div>
         </section>
-      </main>
+
+        <section class="side-panel">
+          <main class="content">
+            <section id="results-placeholder" class="results-placeholder hidden">
+              <div class="placeholder-copy">
+                <div class="placeholder-title">Market leaders and metrics will appear here.</div>
+              </div>
+              <div class="placeholder-grid">
+                <article class="skeleton-card" aria-hidden="true">
+                  <div class="skeleton-line skeleton-rank"></div>
+                  <div class="skeleton-line skeleton-name"></div>
+                  <div class="skeleton-line skeleton-metric"></div>
+                  <div class="skeleton-line skeleton-metric"></div>
+                  <div class="skeleton-line skeleton-source"></div>
+                </article>
+                <article class="skeleton-card" aria-hidden="true">
+                  <div class="skeleton-line skeleton-rank"></div>
+                  <div class="skeleton-line skeleton-name"></div>
+                  <div class="skeleton-line skeleton-metric"></div>
+                  <div class="skeleton-line skeleton-metric"></div>
+                  <div class="skeleton-line skeleton-source"></div>
+                </article>
+                <article class="skeleton-card" aria-hidden="true">
+                  <div class="skeleton-line skeleton-rank"></div>
+                  <div class="skeleton-line skeleton-name"></div>
+                  <div class="skeleton-line skeleton-metric"></div>
+                  <div class="skeleton-line skeleton-metric"></div>
+                  <div class="skeleton-line skeleton-source"></div>
+                </article>
+              </div>
+            </section>
+            <section id="results" class="columns hidden"></section>
+            <section id="apology" class="apology hidden">
+              <div class="scanline"></div>
+              <div class="apology-inner">
+                <div id="apology-title" class="apology-title">Signal Lost</div>
+                <div id="apology-message" class="apology-message">
+                  Sorry - I analyze software markets only.
+                </div>
+                <div id="apology-hint" class="apology-hint">
+                  Try entering a market category: CRM, payments, video conferencing, etc.
+                </div>
+              </div>
+            </section>
+          </main>
+        </section>
+      </div>
     </div>
 
+    <script src="/config.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

@@ -1,43 +1,75 @@
+// Set via /config.js (env: UI_MODE=multi) or defaults to single-turn.
+const CONFIG = window.__MM_CONFIG__ || {};
+const UI_MODE = CONFIG.uiMode === "multi" ? "multi" : "single";
+const ASSISTANT_LABEL = "AGENT";
+
 const form = document.getElementById("market-form");
 const input = document.getElementById("market-input");
 const status = document.getElementById("status");
 const debugPanel = document.getElementById("debug-panel");
 const debugMessage = document.getElementById("debug-message");
 const results = document.getElementById("results");
+const resultsPlaceholder = document.getElementById("results-placeholder");
 const apology = document.getElementById("apology");
 const loading = document.getElementById("loading");
+const chatRail = document.getElementById("chat-rail");
+const appRoot = document.querySelector(".app");
+const quickPickButtons = document.querySelectorAll("[data-query]");
 const apologyTitle = document.getElementById("apology-title");
 const apologyMessage = document.getElementById("apology-message");
 const apologyHint = document.getElementById("apology-hint");
 const categoryTitle = document.getElementById("category-title");
 const rankingBasis = document.getElementById("ranking-basis");
+const inputPlaceholder = input?.getAttribute("placeholder") || "";
+let placeholderCleared = false;
 let eventSource = null;
 let streamDone = false;
+let isLoading = false;
+let hasConversation = false;
+let hasResults = false;
+let awaitingPlanClarification = false;
+let pendingPlanId = null;
+let activeStream = null;
 const statusLines = [];
 const MAX_STATUS_LINES = 8;
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const query = input.value.trim();
-  if (!query) {
-    renderApology({
-      apology: {
-        title: "Signal Lost",
-        message: "Sorry - I analyze software markets only.",
-        hint: "Try: CRM, payments, video conferencing."
-      }
-    });
-    return;
-  }
+const activeMode = UI_MODE === "multi" ? "multi" : "single";
+if (appRoot) {
+  appRoot.dataset.uiMode = activeMode;
+}
 
-  startStream(query);
+const conversationId = (() => {
+  if (activeMode !== "multi") return null;
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `conv_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+})();
+
+form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitQuery(input.value);
 });
 
-async function analyzeMarket(query) {
+if (input) {
+  input.addEventListener("input", () => {
+    if (placeholderCleared) return;
+    if ((input.value || "").trim().length > 0) {
+      clearInputPlaceholder();
+    }
+  });
+}
+
+async function analyzeMarket(query, options = {}) {
   const response = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ input: query })
+    body: JSON.stringify({
+      input: query,
+      stage: options.stage,
+      plan_id: options.planId,
+      conversation_id: options.conversationId
+    })
   });
 
   if (!response.ok) {
@@ -78,20 +110,241 @@ async function readErrorDetail(response) {
   return trimmed.length > maxLen ? `${trimmed.slice(0, maxLen)}...` : trimmed;
 }
 
-function setLoading(isLoading) {
-  form.querySelector("button").disabled = isLoading;
-  if (!loading) return;
-  loading.classList.toggle("hidden", !isLoading);
-  loading.setAttribute("aria-busy", isLoading ? "true" : "false");
-  loading.setAttribute("aria-hidden", isLoading ? "false" : "true");
+function submitQuery(rawQuery) {
+  const query = (rawQuery || "").trim();
+  if (!query) {
+    if (isMultiTurn() && awaitingPlanClarification) {
+      startStream("No additional constraints.", { stage: "execute" });
+      input.value = "";
+      return;
+    }
+    renderApology({
+      apology: {
+        title: "Signal Lost",
+        message: "Sorry - I analyze software markets only.",
+        hint: "Try: CRM, payments, video conferencing."
+      }
+    });
+    return;
+  }
+  if (isLoading) return;
+  clearInputPlaceholder();
+  const stage = isMultiTurn()
+    ? awaitingPlanClarification && pendingPlanId
+      ? "execute"
+      : "plan"
+    : "results";
+  if (isMultiTurn() && stage === "plan") {
+    pendingPlanId = null;
+    awaitingPlanClarification = false;
+  }
+  startStream(query, { stage });
+  input.value = "";
 }
 
-function startStream(query) {
+function clearInputPlaceholder() {
+  if (!input || placeholderCleared) return;
+  input.setAttribute("placeholder", "");
+  placeholderCleared = true;
+}
+
+function isMultiTurn() {
+  return activeMode === "multi";
+}
+
+function setConversationActive(isActive) {
+  if (!appRoot) return;
+  appRoot.classList.toggle("has-history", isActive);
+}
+
+function markConversationStarted() {
+  if (!isMultiTurn() || hasConversation) return;
+  hasConversation = true;
+  setConversationActive(true);
+}
+
+function setResultsPlaceholderVisible(visible) {
+  if (!resultsPlaceholder) return;
+  resultsPlaceholder.classList.toggle("hidden", !visible);
+}
+
+function scrollChatToBottom() {
+  if (!chatRail) return;
+  requestAnimationFrame(() => {
+    chatRail.scrollTop = chatRail.scrollHeight;
+  });
+}
+
+function createChatShell(role, variant) {
+  if (!isMultiTurn() || !chatRail) return null;
+  const message = document.createElement("div");
+  message.className = `chat-message ${role}`;
+  if (variant) {
+    variant
+      .split(" ")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .forEach((entry) => message.classList.add(entry));
+  }
+
+  const label = document.createElement("div");
+  label.className = "chat-label";
+  label.textContent = role === "user" ? "You" : ASSISTANT_LABEL;
+
+  const bubble = document.createElement("div");
+  bubble.className = "chat-bubble";
+
+  message.appendChild(label);
+  message.appendChild(bubble);
+  chatRail.appendChild(message);
+  return { message, bubble };
+}
+
+function appendChatMessage({ role, text, detail, variant }) {
+  const shell = createChatShell(role, variant);
+  if (!shell) return null;
+
+  const mainText = document.createElement("div");
+  mainText.className = "chat-text";
+  mainText.textContent = text || "";
+  shell.bubble.appendChild(mainText);
+
+  if (detail) {
+    const detailLine = document.createElement("div");
+    detailLine.className = "chat-detail";
+    detailLine.textContent = detail;
+    shell.bubble.appendChild(detailLine);
+  }
+
+  scrollChatToBottom();
+  return shell.message;
+}
+
+function appendUserMessage(text) {
+  markConversationStarted();
+  return appendChatMessage({ role: "user", text });
+}
+
+function appendAssistantMessage(text, detail) {
+  return appendChatMessage({ role: "assistant", text, detail });
+}
+
+function ensureWelcomeMessage() {
+  if (!isMultiTurn() || !chatRail) return;
+  if (chatRail.children.length > 0) return;
+
+  return;
+}
+
+function startStreamMessage(headlineText) {
+  if (!isMultiTurn()) return;
+  const shell = createChatShell("assistant", "stream-message is-loading");
+  if (!shell) return;
+
+  const headline = document.createElement("div");
+  headline.className = "chat-text";
+  headline.textContent = headlineText || "Tracing market signals.";
+
+  const list = document.createElement("ul");
+  list.className = "stream-list";
+
+  const indicator = document.createElement("div");
+  indicator.className = "status-dots stream-indicator";
+  const dotOne = document.createElement("span");
+  const dotTwo = document.createElement("span");
+  const dotThree = document.createElement("span");
+  indicator.appendChild(dotOne);
+  indicator.appendChild(dotTwo);
+  indicator.appendChild(dotThree);
+
+  shell.bubble.appendChild(headline);
+  shell.bubble.appendChild(list);
+  shell.bubble.appendChild(indicator);
+
+  activeStream = { message: shell.message, list, indicator };
+  scrollChatToBottom();
+}
+
+function appendStreamLine(text, type) {
+  if (!activeStream) {
+    startStreamMessage();
+  }
+  if (!activeStream) return;
+  const item = document.createElement("li");
+  item.className = `stream-line ${type === "detail" ? "detail" : ""}`.trim();
+  item.textContent = text;
+  activeStream.list.appendChild(item);
+  scrollChatToBottom();
+}
+
+function setStreamLoading(loadingState) {
+  if (!activeStream) return;
+  activeStream.message.classList.toggle("is-loading", loadingState);
+  if (activeStream.indicator) {
+    activeStream.indicator.style.display = loadingState ? "flex" : "none";
+  }
+}
+
+function finalizeStreamMessage() {
+  if (!activeStream) return;
+  activeStream.message.classList.remove("is-loading");
+  if (activeStream.indicator) {
+    activeStream.indicator.remove();
+  }
+  activeStream = null;
+}
+
+function setLoading(loadingState) {
+  isLoading = loadingState;
+  form.querySelector("button").disabled = loadingState;
+  if (loading) {
+    loading.classList.toggle("hidden", !loadingState);
+    loading.setAttribute("aria-busy", loadingState ? "true" : "false");
+    loading.setAttribute("aria-hidden", loadingState ? "false" : "true");
+  }
+  if (isMultiTurn()) {
+    setStreamLoading(loadingState);
+  }
+}
+
+function initializeMultiTurn() {
+  if (!isMultiTurn()) return;
+  hasConversation = false;
+  hasResults = false;
+  awaitingPlanClarification = false;
+  pendingPlanId = null;
+  setConversationActive(false);
+  if (appRoot) {
+    appRoot.classList.remove("has-results");
+  }
+  setResultsPlaceholderVisible(true);
+  ensureWelcomeMessage();
+}
+
+function startStream(query, options = {}) {
+  const stage = options.stage || "results";
   clearPreviousView();
   setLoading(true);
+  appendUserMessage(query);
+  if (isMultiTurn()) {
+    const headline =
+      stage === "plan"
+        ? "Drafting your research plan."
+        : stage === "execute"
+          ? "Executing the updated plan."
+          : "Tracing market signals.";
+    startStreamMessage(headline);
+  }
 
   if (!window.EventSource) {
-    runFallback(query);
+    const fallbackMessage =
+      stage === "plan"
+        ? "Drafting analysis plan..."
+        : stage === "execute"
+          ? "Executing plan..."
+          : "Analyzing input...";
+    appendStreamLine(fallbackMessage, "status");
+    runFallback(query, { stage });
     return;
   }
 
@@ -104,7 +357,17 @@ function startStream(query) {
   clearStatus();
   setDebug("");
 
-  const streamUrl = `/api/analyze/stream?input=${encodeURIComponent(query)}`;
+  const params = new URLSearchParams({ input: query });
+  if (isMultiTurn()) {
+    params.set("stage", stage);
+    if (conversationId) {
+      params.set("conversation_id", conversationId);
+    }
+    if (stage === "execute" && pendingPlanId) {
+      params.set("plan_id", pendingPlanId);
+    }
+  }
+  const streamUrl = `/api/analyze/stream?${params.toString()}`;
   const source = new EventSource(streamUrl);
   eventSource = source;
 
@@ -126,7 +389,9 @@ function startStream(query) {
   source.addEventListener("final", (event) => {
     streamDone = true;
     const payload = readData(event);
-    if (payload?.mode === "apology") {
+    if (payload?.mode === "plan") {
+      renderPlan(payload);
+    } else if (payload?.mode === "apology") {
       renderApology(payload);
     } else if (payload) {
       renderResults(payload);
@@ -150,12 +415,16 @@ function startStream(query) {
   });
 }
 
-async function runFallback(query) {
-  clearPreviousView();
-  setLoading(true);
+async function runFallback(query, options = {}) {
   try {
-    const payload = await analyzeMarket(query);
-    if (payload.mode === "apology") {
+    const payload = await analyzeMarket(query, {
+      stage: options.stage,
+      planId: pendingPlanId,
+      conversationId
+    });
+    if (payload.mode === "plan") {
+      renderPlan(payload);
+    } else if (payload.mode === "apology") {
       renderApology(payload);
     } else {
       renderResults(payload);
@@ -178,8 +447,79 @@ function clearPreviousView() {
   results.innerHTML = "";
   results.classList.add("hidden");
   apology.classList.add("hidden");
+  if (isMultiTurn()) {
+    finalizeStreamMessage();
+    setResultsPlaceholderVisible(true);
+  }
   clearStatus();
   setDebug("");
+}
+
+function renderPlan(payload) {
+  if (!isMultiTurn()) return;
+  finalizeStreamMessage();
+  setResultsPlaceholderVisible(true);
+  pendingPlanId = payload.plan_id || pendingPlanId;
+  awaitingPlanClarification = true;
+
+  const shell = createChatShell("assistant", "plan-message");
+  if (!shell) return;
+
+  const title = document.createElement("div");
+  title.className = "chat-text plan-title";
+  const category = payload.category || "this market";
+  const ranking = formatRankingBasis(payload.ranking_basis || "market_share_revenue");
+  title.textContent = `Plan for ${category}: ranking by ${ranking}.`;
+
+  shell.bubble.appendChild(title);
+
+  const plan = payload.plan || {};
+  if (Array.isArray(plan.sources) && plan.sources.length) {
+    const label = document.createElement("div");
+    label.className = "chat-detail plan-section-label";
+    label.textContent = "Planned sources";
+    const list = document.createElement("ul");
+    list.className = "stream-list plan-list";
+    plan.sources.forEach((source) => {
+      const item = document.createElement("li");
+      item.className = "stream-line plan-line";
+      item.textContent = source;
+      list.appendChild(item);
+    });
+    shell.bubble.appendChild(label);
+    shell.bubble.appendChild(list);
+  }
+
+  if (Array.isArray(plan.metrics) && plan.metrics.length) {
+    const label = document.createElement("div");
+    label.className = "chat-detail plan-section-label";
+    label.textContent = "Metrics to gather";
+    const list = document.createElement("ul");
+    list.className = "stream-list plan-list";
+    plan.metrics.forEach((metric) => {
+      const item = document.createElement("li");
+      item.className = "stream-line plan-line";
+      item.textContent = metric;
+      list.appendChild(item);
+    });
+    shell.bubble.appendChild(label);
+    shell.bubble.appendChild(list);
+  }
+
+  if (plan.approach) {
+    const approach = document.createElement("div");
+    approach.className = "chat-detail plan-approach";
+    approach.textContent = plan.approach;
+    shell.bubble.appendChild(approach);
+  }
+
+  const question = document.createElement("div");
+  question.className = "chat-text plan-question";
+  question.textContent =
+    payload.clarifying_question ||
+    "Any constraints or preferences before I proceed?";
+  shell.bubble.appendChild(question);
+  scrollChatToBottom();
 }
 
 function renderResults(payload) {
@@ -232,6 +572,19 @@ function renderResults(payload) {
     card.appendChild(sources);
     results.appendChild(card);
   });
+
+  if (isMultiTurn()) {
+    setResultsPlaceholderVisible(false);
+    finalizeStreamMessage();
+    awaitingPlanClarification = false;
+    pendingPlanId = null;
+    hasResults = true;
+    if (appRoot) {
+      appRoot.classList.add("has-results");
+    }
+    const title = payload.category ? `${payload.category} ready.` : "Market map ready.";
+    appendAssistantMessage(title);
+  }
 }
 
 function renderMetric(metric) {
@@ -287,14 +640,25 @@ function renderSourceLink(source) {
 
 function renderApology(apologyPayload) {
   const content = apologyPayload?.apology || {};
-  apologyTitle.textContent = content.title || "Signal Lost";
-  apologyMessage.textContent =
-    content.message || "Sorry - I analyze software markets only.";
-  apologyHint.textContent =
-    content.hint || "Try: CRM, payments, video conferencing.";
+  const message = content.message || "Sorry - I analyze software markets only.";
+  const hint = content.hint || "Try: CRM, payments, video conferencing.";
   setDebug(apologyPayload?.debug?.message || "");
 
   results.classList.add("hidden");
+
+  if (isMultiTurn()) {
+    finalizeStreamMessage();
+    setResultsPlaceholderVisible(true);
+    awaitingPlanClarification = false;
+    pendingPlanId = null;
+    appendAssistantMessage(content.title || "Signal Lost", `${message} ${hint}`.trim());
+    apology.classList.add("hidden");
+    return;
+  }
+
+  apologyTitle.textContent = content.title || "Signal Lost";
+  apologyMessage.textContent = message;
+  apologyHint.textContent = hint;
   apology.classList.remove("hidden");
 }
 
@@ -364,6 +728,10 @@ function renderEvidenceText(text) {
 
 function appendStatusLine(message, type) {
   if (!message) return;
+  if (isMultiTurn()) {
+    appendStreamLine(message, type);
+    return;
+  }
   statusLines.push({ message, type });
   if (statusLines.length > MAX_STATUS_LINES) {
     statusLines.shift();
@@ -372,6 +740,7 @@ function appendStatusLine(message, type) {
 }
 
 function renderStatusLines() {
+  if (isMultiTurn()) return;
   status.innerHTML = "";
   statusLines.forEach((line) => {
     const item = document.createElement("div");
@@ -399,3 +768,15 @@ function readData(event) {
     return null;
   }
 }
+
+quickPickButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const query = button.dataset.query || button.textContent || "";
+    if (!query.trim()) return;
+    input.value = query;
+    clearInputPlaceholder();
+    submitQuery(query);
+  });
+});
+
+initializeMultiTurn();
