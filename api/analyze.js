@@ -294,10 +294,10 @@ export default async function handler(req, res) {
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
+      await finalizeTrace(trace, result, html);
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(result));
-      finalizeTraceAsync(trace, result, html);
       return;
     }
 
@@ -306,10 +306,10 @@ export default async function handler(req, res) {
       trace.event("cache_hit", { key: cached.key, source: cached.source });
       cached.payload.trace_parent = traceParent;
       const html = renderHtml(cached.payload);
+      await finalizeTrace(trace, cached.payload, html);
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(cached.payload));
-      finalizeTraceAsync(trace, cached.payload, html);
       return;
     }
 
@@ -330,10 +330,10 @@ export default async function handler(req, res) {
         });
         stale.payload.trace_parent = traceParent;
         const html = renderHtml(stale.payload);
+        await finalizeTrace(trace, stale.payload, html);
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify(stale.payload));
-        finalizeTraceAsync(trace, stale.payload, html);
         return;
       }
       const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
@@ -349,10 +349,10 @@ export default async function handler(req, res) {
     const result = { ...queued.value, trace_parent: traceParent };
     const html = renderHtml(result);
     storeCachedPayload(input, result);
+    await finalizeTrace(trace, result, html);
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(result));
-    finalizeTraceAsync(trace, result, html);
   } catch (err) {
     const errorPayload = { ...fallback, debug: { message: err.message || "Unknown error" } };
     errorPayload.trace_parent = traceParent;
@@ -603,20 +603,13 @@ async function logCitationPages(payload, trace) {
   }
 }
 
-function finalizeTraceAsync(trace, payload, html) {
+async function finalizeTrace(trace, payload, html) {
   if (!trace || typeof trace.end !== "function") return;
-  void (async () => {
-    try {
-      await logCitationPages(payload, trace);
-    } catch (err) {
-      trace?.event?.("citation_page_error", { message: err.message });
-    }
-    try {
-      await trace.end(payload, html);
-    } catch (err) {
-      // Swallow errors to avoid crashing the request.
-    }
-  })();
+  try {
+    await trace.end(payload, html);
+  } catch (err) {
+    // Swallow errors to avoid crashing the request.
+  }
 }
 
 async function fetchCitationPages(payload, options = {}) {

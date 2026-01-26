@@ -436,8 +436,8 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         traceStore.delete(conversationId);
       }
       sendStreamEvent(res, closed, "final", result);
+      await finalizeTrace(trace, result, html);
       res.end();
-      finalizeTraceAsync(trace, result, html);
       return;
     } catch (err) {
       const errorPayload = {
@@ -466,8 +466,8 @@ async function handleAnalyzeStream(req, res, requestUrl) {
     sendStreamEvent(res, closed, "status", { message: "Cache hit. Returning cached results." });
     const html = renderHtml(cached.payload);
     sendStreamEvent(res, closed, "final", cached.payload);
+    await finalizeTrace(trace, cached.payload, html);
     res.end();
-    finalizeTraceAsync(trace, cached.payload, html);
     return;
   }
 
@@ -509,8 +509,8 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         });
         const html = renderHtml(stale.payload);
         sendStreamEvent(res, closed, "final", stale.payload);
+        await finalizeTrace(trace, stale.payload, html);
         res.end();
-        finalizeTraceAsync(trace, stale.payload, html);
         return;
       }
       const errorPayload = {
@@ -530,8 +530,8 @@ async function handleAnalyzeStream(req, res, requestUrl) {
     const html = renderHtml(result);
     storeCachedPayload(input, result);
     sendStreamEvent(res, closed, "final", result);
+    await finalizeTrace(trace, result, html);
     res.end();
-    finalizeTraceAsync(trace, result, html);
   } catch (err) {
     const errorPayload = {
       ...fallback,
@@ -793,9 +793,9 @@ async function handleAnalyze(req, res) {
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
+      await finalizeTrace(trace, result, html);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
-      finalizeTraceAsync(trace, result, html);
       return;
     }
 
@@ -803,9 +803,9 @@ async function handleAnalyze(req, res) {
     if (cached) {
       trace.event("cache_hit", { key: cached.key, source: cached.source });
       const html = renderHtml(cached.payload);
+      await finalizeTrace(trace, cached.payload, html);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(cached.payload));
-      finalizeTraceAsync(trace, cached.payload, html);
       return;
     }
 
@@ -825,9 +825,9 @@ async function handleAnalyze(req, res) {
           stale: stale.stale
         });
         const html = renderHtml(stale.payload);
+        await finalizeTrace(trace, stale.payload, html);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(stale.payload));
-        finalizeTraceAsync(trace, stale.payload, html);
         return;
       }
       const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
@@ -841,9 +841,9 @@ async function handleAnalyze(req, res) {
     const result = queued.value;
     const html = renderHtml(result);
     storeCachedPayload(input, result);
+    await finalizeTrace(trace, result, html);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(result));
-    finalizeTraceAsync(trace, result, html);
   } catch (err) {
     const errorPayload = { ...fallback, debug: { message: err.message || "Unknown error" } };
     const html = renderHtml(errorPayload);
@@ -1065,20 +1065,13 @@ async function logCitationPages(payload, trace) {
   }
 }
 
-function finalizeTraceAsync(trace, payload, html) {
+async function finalizeTrace(trace, payload, html) {
   if (!trace || typeof trace.end !== "function") return;
-  void (async () => {
-    try {
-      await logCitationPages(payload, trace);
-    } catch (err) {
-      trace?.event?.("citation_page_error", { message: err.message });
-    }
-    try {
-      await trace.end(payload, html);
-    } catch (err) {
-      // Swallow errors to avoid crashing the request.
-    }
-  })();
+  try {
+    await trace.end(payload, html);
+  } catch (err) {
+    // Swallow errors to avoid crashing the request.
+  }
 }
 
 async function fetchCitationPages(payload, options = {}) {

@@ -418,8 +418,8 @@ export default async function handler(req, res) {
       }
       result.trace_parent = traceParent;
       sendStreamEvent(res, closed, "final", result);
+      await finalizeTrace(trace, result, html);
       res.end();
-      finalizeTraceAsync(trace, result, html);
       return;
     } catch (err) {
       const errorPayload = {
@@ -450,8 +450,8 @@ export default async function handler(req, res) {
     const html = renderHtml(cached.payload);
     cached.payload.trace_parent = traceParent;
     sendStreamEvent(res, closed, "final", cached.payload);
+    await finalizeTrace(trace, cached.payload, html);
     res.end();
-    finalizeTraceAsync(trace, cached.payload, html);
     return;
   }
 
@@ -494,8 +494,8 @@ export default async function handler(req, res) {
         const html = renderHtml(stale.payload);
         stale.payload.trace_parent = traceParent;
         sendStreamEvent(res, closed, "final", stale.payload);
+        await finalizeTrace(trace, stale.payload, html);
         res.end();
-        finalizeTraceAsync(trace, stale.payload, html);
         return;
       }
       const errorPayload = {
@@ -517,8 +517,8 @@ export default async function handler(req, res) {
     storeCachedPayload(input, result);
     result.trace_parent = traceParent;
     sendStreamEvent(res, closed, "final", result);
+    await finalizeTrace(trace, result, html);
     res.end();
-    finalizeTraceAsync(trace, result, html);
   } catch (err) {
     const errorPayload = {
       ...fallback,
@@ -932,20 +932,13 @@ async function logCitationPages(payload, trace) {
   }
 }
 
-function finalizeTraceAsync(trace, payload, html) {
+async function finalizeTrace(trace, payload, html) {
   if (!trace || typeof trace.end !== "function") return;
-  void (async () => {
-    try {
-      await logCitationPages(payload, trace);
-    } catch (err) {
-      trace?.event?.("citation_page_error", { message: err.message });
-    }
-    try {
-      await trace.end(payload, html);
-    } catch (err) {
-      // Swallow errors to avoid crashing the request.
-    }
-  })();
+  try {
+    await trace.end(payload, html);
+  } catch (err) {
+    // Swallow errors to avoid crashing the request.
+  }
 }
 
 async function fetchCitationPages(payload, options = {}) {
