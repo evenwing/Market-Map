@@ -16,6 +16,7 @@ const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MINUTES || 15) * 60 * 1000;
 const PLAN_TTL_MS = Number(process.env.PLAN_TTL_MINUTES || 30) * 60 * 1000;
 const TRACE_TTL_MS = Number(process.env.TRACE_TTL_MINUTES || 45) * 60 * 1000;
 const TRACE_FLUSH_TIMEOUT_MS = Number(process.env.TRACE_FLUSH_TIMEOUT_MS || 3000);
+const TRACE_CITATION_TIMEOUT_MS = Number(process.env.TRACE_CITATION_TIMEOUT_MS || 8000);
 const inputCache = new Map();
 const categoryCache = new Map();
 const planStore = new Map();
@@ -607,6 +608,7 @@ async function logCitationPages(payload, trace) {
 async function finalizeTrace(trace, payload, html) {
   if (!trace || typeof trace.end !== "function") return;
   try {
+    await withTimeout(logCitationPages(payload, trace), TRACE_CITATION_TIMEOUT_MS);
     await withTimeout(trace.end(payload, html), TRACE_FLUSH_TIMEOUT_MS);
   } catch (err) {
     // Swallow errors to avoid crashing the request.
