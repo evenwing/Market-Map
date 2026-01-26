@@ -25,6 +25,7 @@ let placeholderCleared = false;
 let pendingPlanPayload = null;
 let pendingPlanBaseInput = "";
 let lastPlanInput = "";
+let traceParent = null;
 let eventSource = null;
 let streamDone = false;
 let isLoading = false;
@@ -72,7 +73,8 @@ async function analyzeMarket(query, options = {}) {
       stage: options.stage,
       plan_id: options.planId,
       conversation_id: options.conversationId,
-      plan_snapshot: options.planSnapshot
+      plan_snapshot: options.planSnapshot,
+      trace_parent: options.traceParent
     })
   });
 
@@ -335,6 +337,10 @@ function initializeMultiTurn() {
   hasResults = false;
   awaitingPlanClarification = false;
   pendingPlanId = null;
+  pendingPlanPayload = null;
+  pendingPlanBaseInput = "";
+  lastPlanInput = "";
+  traceParent = null;
   setConversationActive(false);
   if (appRoot) {
     appRoot.classList.remove("has-results");
@@ -385,6 +391,10 @@ function startStream(query, options = {}) {
     if (conversationId) {
       params.set("conversation_id", conversationId);
     }
+    if (traceParent) {
+      const encoded = encodeBase64Url(JSON.stringify(traceParent));
+      params.set("trace_parent", encoded);
+    }
     if (stage === "execute" && pendingPlanId) {
       params.set("plan_id", pendingPlanId);
     }
@@ -417,6 +427,9 @@ function startStream(query, options = {}) {
   source.addEventListener("final", (event) => {
     streamDone = true;
     const payload = readData(event);
+    if (payload?.trace_parent) {
+      traceParent = payload.trace_parent;
+    }
     if (payload?.mode === "plan") {
       renderPlan(payload);
     } else if (payload?.mode === "apology") {
@@ -449,8 +462,12 @@ async function runFallback(query, options = {}) {
       stage: options.stage,
       planId: pendingPlanId,
       conversationId,
-      planSnapshot: buildPlanSnapshot()
+      planSnapshot: buildPlanSnapshot(),
+      traceParent: traceParent ? encodeBase64Url(JSON.stringify(traceParent)) : null
     });
+    if (payload?.trace_parent) {
+      traceParent = payload.trace_parent;
+    }
     if (payload.mode === "plan") {
       renderPlan(payload);
     } else if (payload.mode === "apology") {

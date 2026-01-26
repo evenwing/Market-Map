@@ -33,10 +33,18 @@ export default async function handler(req, res) {
   const stage = requestUrl.searchParams.get("stage") || "results";
   const planIdParam = requestUrl.searchParams.get("plan_id") || "";
   const planSnapshot = requestUrl.searchParams.get("plan_snapshot") || "";
+  const traceParentParam = requestUrl.searchParams.get("trace_parent") || "";
   const conversationId = requestUrl.searchParams.get("conversation_id") || "";
   const sessionId = conversationId || crypto.randomUUID();
-  const traceContext = await getOrCreateTraceContext({ input, sessionId, conversationId });
+  const parentSpanIds = decodeTraceParent(traceParentParam);
+  const traceContext = await getOrCreateTraceContext({
+    input,
+    sessionId,
+    conversationId,
+    parentSpanIds
+  });
   const trace = traceContext.trace;
+  const traceParent = trace.getSpanIds?.() || null;
   trace.event("input_received", {
     input,
     streaming: true,
@@ -61,6 +69,7 @@ export default async function handler(req, res) {
     if (traceContext.persistent) {
       traceStore.delete(conversationId);
     }
+    fallback.trace_parent = traceParent;
     sendStreamEvent(res, closed, "final", fallback);
     res.end();
     return;
@@ -109,6 +118,7 @@ export default async function handler(req, res) {
           ...fallback,
           debug: { message: "Server busy. Please retry." }
         };
+        errorPayload.trace_parent = traceParent;
         if (traceContext.persistent) {
           traceStore.delete(conversationId);
         }
@@ -124,7 +134,8 @@ export default async function handler(req, res) {
       const planPayload = {
         ...queued.value,
         plan_id: planId,
-        base_input: input
+        base_input: input,
+        trace_parent: traceParent
       };
       storePlan(planId, queued.value, input);
       planSpan?.log?.({
@@ -150,6 +161,7 @@ export default async function handler(req, res) {
           message: err.message || "Unknown error"
         }
       };
+      errorPayload.trace_parent = traceParent;
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
@@ -171,7 +183,8 @@ export default async function handler(req, res) {
     if (!planEntry) {
       const errorPayload = {
         ...fallback,
-        debug: { message: "Plan expired. Please submit a new query." }
+        debug: { message: "Plan expired. Please submit a new query." },
+        trace_parent: traceParent
       };
       const html = renderHtml(errorPayload);
       await trace.end(errorPayload, html);
@@ -272,6 +285,7 @@ export default async function handler(req, res) {
             ...fallback,
             debug: { message: "Server busy. Please retry." }
           };
+          errorPayload.trace_parent = traceParent;
           const html = renderHtml(errorPayload);
           await trace.end(errorPayload, html);
           if (traceContext.persistent) {
@@ -287,7 +301,8 @@ export default async function handler(req, res) {
         const planPayload = {
           ...queuedPlan.value,
           plan_id: planId,
-          base_input: replanInput
+          base_input: replanInput,
+          trace_parent: traceParent
         };
         storePlan(planId, queuedPlan.value, replanInput);
         planSpan?.log?.({
@@ -313,6 +328,7 @@ export default async function handler(req, res) {
             message: err.message || "Unknown error"
           }
         };
+        errorPayload.trace_parent = traceParent;
         const html = renderHtml(errorPayload);
         trace.event("error", { message: err.message });
         await trace.error(err, html);
@@ -368,6 +384,7 @@ export default async function handler(req, res) {
           ...fallback,
           debug: { message: "Server busy. Please retry." }
         };
+        errorPayload.trace_parent = traceParent;
         const html = renderHtml(errorPayload);
         await trace.end(errorPayload, html);
         if (traceContext.persistent) {
@@ -396,6 +413,7 @@ export default async function handler(req, res) {
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
+      result.trace_parent = traceParent;
       sendStreamEvent(res, closed, "final", result);
       res.end();
       return;
@@ -406,6 +424,7 @@ export default async function handler(req, res) {
           message: err.message || "Unknown error"
         }
       };
+      errorPayload.trace_parent = traceParent;
       const html = renderHtml(errorPayload);
       trace.event("error", { message: err.message });
       await trace.error(err, html);
@@ -426,6 +445,7 @@ export default async function handler(req, res) {
     sendStreamEvent(res, closed, "status", { message: "Cache hit. Returning cached results." });
     const html = renderHtml(cached.payload);
     await trace.end(cached.payload, html);
+    cached.payload.trace_parent = traceParent;
     sendStreamEvent(res, closed, "final", cached.payload);
     res.end();
     return;
@@ -469,6 +489,7 @@ export default async function handler(req, res) {
         });
         const html = renderHtml(stale.payload);
         await trace.end(stale.payload, html);
+        stale.payload.trace_parent = traceParent;
         sendStreamEvent(res, closed, "final", stale.payload);
         res.end();
         return;
@@ -477,6 +498,7 @@ export default async function handler(req, res) {
         ...fallback,
         debug: { message: "Server busy. Please retry." }
       };
+      errorPayload.trace_parent = traceParent;
       const html = renderHtml(errorPayload);
       await trace.end(errorPayload, html);
       sendStreamEvent(res, closed, "debug", { message: errorPayload.debug.message });
@@ -490,6 +512,7 @@ export default async function handler(req, res) {
     const html = renderHtml(result);
     await trace.end(result, html);
     storeCachedPayload(input, result);
+    result.trace_parent = traceParent;
     sendStreamEvent(res, closed, "final", result);
     res.end();
   } catch (err) {
@@ -499,6 +522,7 @@ export default async function handler(req, res) {
         message: err.message || "Unknown error"
       }
     };
+    errorPayload.trace_parent = traceParent;
     const html = renderHtml(errorPayload);
     trace.event("error", { message: err.message });
     await trace.error(err, html);
@@ -679,10 +703,10 @@ function getStoredTrace(conversationId) {
   return entry.trace;
 }
 
-async function getOrCreateTraceContext({ input, sessionId, conversationId }) {
+async function getOrCreateTraceContext({ input, sessionId, conversationId, parentSpanIds }) {
   if (!conversationId) {
     return {
-      trace: await createTrace({ input, sessionId }),
+      trace: await createTrace({ input, sessionId, parentSpanIds }),
       persistent: false
     };
   }
@@ -690,7 +714,7 @@ async function getOrCreateTraceContext({ input, sessionId, conversationId }) {
   if (existing) {
     return { trace: existing, persistent: true };
   }
-  const trace = await createTrace({ input, sessionId: conversationId });
+  const trace = await createTrace({ input, sessionId: conversationId, parentSpanIds });
   traceStore.set(conversationId, { trace, timestamp: Date.now() });
   return { trace, persistent: true };
 }
@@ -784,6 +808,23 @@ function normalizeRedirectCandidate(value) {
     return decoded;
   }
   return "";
+}
+
+function decodeTraceParent(value) {
+  if (!value || typeof value !== "string") return null;
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const decoded = Buffer.from(padded, "base64").toString("utf8");
+    const parsed = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== "object") return null;
+    const spanId = typeof parsed.span_id === "string" ? parsed.span_id : "";
+    const rootSpanId = typeof parsed.root_span_id === "string" ? parsed.root_span_id : "";
+    if (!spanId || !rootSpanId) return null;
+    return { spanId, rootSpanId };
+  } catch (err) {
+    return null;
+  }
 }
 
 async function verifyAndRepairCitations(payload, context = {}) {

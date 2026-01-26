@@ -34,6 +34,7 @@ export default async function handler(req, res) {
   let planId = "";
   let conversationId = "";
   let planSnapshot = "";
+  let traceParentParam = "";
 
   try {
     const parsed = JSON.parse(body || "{}");
@@ -42,13 +43,21 @@ export default async function handler(req, res) {
     planId = typeof parsed.plan_id === "string" ? parsed.plan_id : "";
     conversationId = typeof parsed.conversation_id === "string" ? parsed.conversation_id : "";
     planSnapshot = typeof parsed.plan_snapshot === "string" ? parsed.plan_snapshot : "";
+    traceParentParam = typeof parsed.trace_parent === "string" ? parsed.trace_parent : "";
   } catch (err) {
     input = "";
   }
 
   const sessionId = conversationId || crypto.randomUUID();
-  const traceContext = await getOrCreateTraceContext({ input, sessionId, conversationId });
+  const parentSpanIds = decodeTraceParent(traceParentParam);
+  const traceContext = await getOrCreateTraceContext({
+    input,
+    sessionId,
+    conversationId,
+    parentSpanIds
+  });
   const trace = traceContext.trace;
+  const traceParent = trace.getSpanIds?.() || null;
   trace.event("input_received", {
     input,
     stage,
@@ -94,6 +103,7 @@ export default async function handler(req, res) {
 
         if (queued.status === "timeout") {
           const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
+          errorPayload.trace_parent = traceParent;
           if (traceContext.persistent) {
             traceStore.delete(conversationId);
           }
@@ -109,7 +119,8 @@ export default async function handler(req, res) {
         const planPayload = {
           ...queued.value,
           plan_id: derivedPlanId,
-          base_input: input
+          base_input: input,
+          trace_parent: traceParent
         };
         storePlan(derivedPlanId, queued.value, input);
         planSpan?.log?.({
@@ -140,7 +151,8 @@ export default async function handler(req, res) {
       if (!planEntry) {
         const errorPayload = {
           ...fallback,
-          debug: { message: "Plan expired. Please submit a new query." }
+          debug: { message: "Plan expired. Please submit a new query." },
+          trace_parent: traceParent
         };
         const html = renderHtml(errorPayload);
         await trace.end(errorPayload, html);
@@ -201,7 +213,8 @@ export default async function handler(req, res) {
           );
 
           if (queuedPlan.status === "timeout") {
-            const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
+          const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
+          errorPayload.trace_parent = traceParent;
             if (traceContext.persistent) {
               traceStore.delete(conversationId);
             }
@@ -217,7 +230,8 @@ export default async function handler(req, res) {
           const planPayload = {
             ...queuedPlan.value,
             plan_id: updatedPlanId,
-            base_input: replanInput
+            base_input: replanInput,
+            trace_parent: traceParent
           };
           storePlan(updatedPlanId, queuedPlan.value, replanInput);
           planSpan?.log?.({
@@ -272,6 +286,7 @@ export default async function handler(req, res) {
 
       let result = queued.value;
       result = await verifyAndRepairCitations(result, { trace });
+      result.trace_parent = traceParent;
       if (planId) {
         planStore.delete(planId);
       }
@@ -289,6 +304,7 @@ export default async function handler(req, res) {
     const cached = findCachedPayload(input);
     if (cached) {
       trace.event("cache_hit", { key: cached.key, source: cached.source });
+      cached.payload.trace_parent = traceParent;
       const html = renderHtml(cached.payload);
       await trace.end(cached.payload, html);
       res.statusCode = 200;
@@ -312,6 +328,7 @@ export default async function handler(req, res) {
           source: stale.source,
           stale: stale.stale
         });
+        stale.payload.trace_parent = traceParent;
         const html = renderHtml(stale.payload);
         await trace.end(stale.payload, html);
         res.statusCode = 200;
@@ -320,6 +337,7 @@ export default async function handler(req, res) {
         return;
       }
       const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
+      errorPayload.trace_parent = traceParent;
       const html = renderHtml(errorPayload);
       await trace.end(errorPayload, html);
       res.statusCode = 200;
@@ -328,7 +346,7 @@ export default async function handler(req, res) {
       return;
     }
 
-    const result = queued.value;
+    const result = { ...queued.value, trace_parent: traceParent };
     const html = renderHtml(result);
     await trace.end(result, html);
     storeCachedPayload(input, result);
@@ -337,6 +355,7 @@ export default async function handler(req, res) {
     res.end(JSON.stringify(result));
   } catch (err) {
     const errorPayload = { ...fallback, debug: { message: err.message || "Unknown error" } };
+    errorPayload.trace_parent = traceParent;
     const html = renderHtml(errorPayload);
     trace.event("error", { message: err.message });
     await trace.error(err, html);
@@ -456,10 +475,10 @@ function getStoredTrace(conversationId) {
   return entry.trace;
 }
 
-async function getOrCreateTraceContext({ input, sessionId, conversationId }) {
+async function getOrCreateTraceContext({ input, sessionId, conversationId, parentSpanIds }) {
   if (!conversationId) {
     return {
-      trace: await createTrace({ input, sessionId }),
+      trace: await createTrace({ input, sessionId, parentSpanIds }),
       persistent: false
     };
   }
@@ -467,9 +486,26 @@ async function getOrCreateTraceContext({ input, sessionId, conversationId }) {
   if (existing) {
     return { trace: existing, persistent: true };
   }
-  const trace = await createTrace({ input, sessionId: conversationId });
+  const trace = await createTrace({ input, sessionId: conversationId, parentSpanIds });
   traceStore.set(conversationId, { trace, timestamp: Date.now() });
   return { trace, persistent: true };
+}
+
+function decodeTraceParent(value) {
+  if (!value || typeof value !== "string") return null;
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const decoded = Buffer.from(padded, "base64").toString("utf8");
+    const parsed = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== "object") return null;
+    const spanId = typeof parsed.span_id === "string" ? parsed.span_id : "";
+    const rootSpanId = typeof parsed.root_span_id === "string" ? parsed.root_span_id : "";
+    if (!spanId || !rootSpanId) return null;
+    return { spanId, rootSpanId };
+  } catch (err) {
+    return null;
+  }
 }
 
 async function verifyAndRepairCitations(payload, context = {}) {
