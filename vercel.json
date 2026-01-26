@@ -2,10 +2,12 @@
   "version": 2,
   "routes": [
     { "src": "/api/(.*)", "dest": "/api/$1" },
+    { "src": "/config.js", "dest": "/api/config.js" },
     { "src": "/", "dest": "/public/index.html" },
     { "src": "/(.*)", "dest": "/public/$1" }
   ],
   "functions": {
+    "api/config.js": { "maxDuration": 10 },
     "api/analyze.js": { "maxDuration": 60 },
     "api/analyze/stream.js": { "maxDuration": 60 }
   }
