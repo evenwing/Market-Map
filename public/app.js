@@ -517,7 +517,7 @@ function renderPlan(payload) {
   const title = document.createElement("div");
   title.className = "chat-text plan-title";
   const category = payload.category || "this market";
-  const ranking = formatRankingBasis(payload.ranking_basis || "market_share_revenue");
+  const ranking = formatRankingBasis(payload.ranking_basis || "revenue");
   title.textContent = `Plan for ${category}: ranking by ${ranking}.`;
 
   shell.bubble.appendChild(title);
@@ -717,6 +717,8 @@ function renderApology(apologyPayload) {
 
 function formatRankingBasis(value) {
   switch (value) {
+    case "revenue":
+      return "Revenue";
     case "market_share_revenue":
       return "Market share (revenue)";
     case "valuation":
