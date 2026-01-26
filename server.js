@@ -164,7 +164,8 @@ async function handleAnalyzeStream(req, res, requestUrl) {
       const planId = planIdParam || crypto.randomUUID();
       const planPayload = {
         ...queued.value,
-        plan_id: planId
+        plan_id: planId,
+        base_input: input
       };
       storePlan(planId, queued.value, input);
       planSpan?.log?.({
@@ -325,7 +326,8 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         const planId = planIdParam || crypto.randomUUID();
         const planPayload = {
           ...queuedPlan.value,
-          plan_id: planId
+          plan_id: planId,
+          base_input: replanInput
         };
         storePlan(planId, queuedPlan.value, replanInput);
         planSpan?.log?.({
@@ -624,10 +626,11 @@ async function handleAnalyze(req, res) {
         }
 
         const derivedPlanId = planId || crypto.randomUUID();
-        const planPayload = {
-          ...queued.value,
-          plan_id: derivedPlanId
-        };
+      const planPayload = {
+        ...queued.value,
+        plan_id: derivedPlanId,
+        base_input: input
+      };
         storePlan(derivedPlanId, queued.value, input);
         planSpan?.log?.({
           output: planPayload,
@@ -729,7 +732,8 @@ async function handleAnalyze(req, res) {
           const updatedPlanId = planId || crypto.randomUUID();
           const planPayload = {
             ...queuedPlan.value,
-            plan_id: updatedPlanId
+            plan_id: updatedPlanId,
+            base_input: replanInput
           };
           storePlan(updatedPlanId, queuedPlan.value, replanInput);
           planSpan?.log?.({

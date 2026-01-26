@@ -33,6 +33,7 @@ export default async function handler(req, res) {
   let stage = "results";
   let planId = "";
   let conversationId = "";
+  let planSnapshot = "";
 
   try {
     const parsed = JSON.parse(body || "{}");
@@ -40,6 +41,7 @@ export default async function handler(req, res) {
     stage = typeof parsed.stage === "string" ? parsed.stage : "results";
     planId = typeof parsed.plan_id === "string" ? parsed.plan_id : "";
     conversationId = typeof parsed.conversation_id === "string" ? parsed.conversation_id : "";
+    planSnapshot = typeof parsed.plan_snapshot === "string" ? parsed.plan_snapshot : "";
   } catch (err) {
     input = "";
   }
@@ -106,7 +108,8 @@ export default async function handler(req, res) {
         const derivedPlanId = planId || crypto.randomUUID();
         const planPayload = {
           ...queued.value,
-          plan_id: derivedPlanId
+          plan_id: derivedPlanId,
+          base_input: input
         };
         storePlan(derivedPlanId, queued.value, input);
         planSpan?.log?.({
@@ -132,7 +135,8 @@ export default async function handler(req, res) {
     }
 
     if (stage === "execute") {
-      const planEntry = getPlan(planId);
+      const snapshot = decodePlanSnapshot(planSnapshot);
+      const planEntry = getPlan(planId) || (snapshot ? { plan: snapshot.plan, baseInput: snapshot.baseInput } : null);
       if (!planEntry) {
         const errorPayload = {
           ...fallback,
@@ -212,7 +216,8 @@ export default async function handler(req, res) {
           const updatedPlanId = planId || crypto.randomUUID();
           const planPayload = {
             ...queuedPlan.value,
-            plan_id: updatedPlanId
+            plan_id: updatedPlanId,
+            base_input: replanInput
           };
           storePlan(updatedPlanId, queuedPlan.value, replanInput);
           planSpan?.log?.({
@@ -419,6 +424,23 @@ function buildReplanInput(baseInput, clarification) {
   if (!detail) return base;
   if (!base) return detail;
   return `${base}\nClarification: ${detail}`;
+}
+
+function decodePlanSnapshot(value) {
+  if (!value || typeof value !== "string") return null;
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const decoded = Buffer.from(padded, "base64").toString("utf8");
+    const parsed = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== "object") return null;
+    const plan = parsed.plan && typeof parsed.plan === "object" ? parsed.plan : null;
+    const baseInput = typeof parsed.baseInput === "string" ? parsed.baseInput : "";
+    if (!plan || !baseInput) return null;
+    return { plan, baseInput };
+  } catch (err) {
+    return null;
+  }
 }
 
 function getStoredTrace(conversationId) {

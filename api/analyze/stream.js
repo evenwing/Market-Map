@@ -32,6 +32,7 @@ export default async function handler(req, res) {
   const input = requestUrl.searchParams.get("input")?.trim() || "";
   const stage = requestUrl.searchParams.get("stage") || "results";
   const planIdParam = requestUrl.searchParams.get("plan_id") || "";
+  const planSnapshot = requestUrl.searchParams.get("plan_snapshot") || "";
   const conversationId = requestUrl.searchParams.get("conversation_id") || "";
   const sessionId = conversationId || crypto.randomUUID();
   const traceContext = await getOrCreateTraceContext({ input, sessionId, conversationId });
@@ -122,7 +123,8 @@ export default async function handler(req, res) {
       const planId = planIdParam || crypto.randomUUID();
       const planPayload = {
         ...queued.value,
-        plan_id: planId
+        plan_id: planId,
+        base_input: input
       };
       storePlan(planId, queued.value, input);
       planSpan?.log?.({
@@ -164,7 +166,8 @@ export default async function handler(req, res) {
   }
 
   if (stage === "execute") {
-    const planEntry = getPlan(planIdParam);
+    const snapshot = decodePlanSnapshot(planSnapshot);
+    const planEntry = getPlan(planIdParam) || (snapshot ? { plan: snapshot.plan, baseInput: snapshot.baseInput } : null);
     if (!planEntry) {
       const errorPayload = {
         ...fallback,
@@ -283,7 +286,8 @@ export default async function handler(req, res) {
         const planId = planIdParam || crypto.randomUUID();
         const planPayload = {
           ...queuedPlan.value,
-          plan_id: planId
+          plan_id: planId,
+          base_input: replanInput
         };
         storePlan(planId, queuedPlan.value, replanInput);
         planSpan?.log?.({
@@ -643,6 +647,23 @@ function buildReplanInput(baseInput, clarification) {
   if (!detail) return base;
   if (!base) return detail;
   return `${base}\nClarification: ${detail}`;
+}
+
+function decodePlanSnapshot(value) {
+  if (!value || typeof value !== "string") return null;
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const decoded = Buffer.from(padded, "base64").toString("utf8");
+    const parsed = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== "object") return null;
+    const plan = parsed.plan && typeof parsed.plan === "object" ? parsed.plan : null;
+    const baseInput = typeof parsed.baseInput === "string" ? parsed.baseInput : "";
+    if (!plan || !baseInput) return null;
+    return { plan, baseInput };
+  } catch (err) {
+    return null;
+  }
 }
 
 function getStoredTrace(conversationId) {

@@ -22,6 +22,9 @@ const categoryTitle = document.getElementById("category-title");
 const rankingBasis = document.getElementById("ranking-basis");
 const inputPlaceholder = input?.getAttribute("placeholder") || "";
 let placeholderCleared = false;
+let pendingPlanPayload = null;
+let pendingPlanBaseInput = "";
+let lastPlanInput = "";
 let eventSource = null;
 let streamDone = false;
 let isLoading = false;
@@ -68,7 +71,8 @@ async function analyzeMarket(query, options = {}) {
       input: query,
       stage: options.stage,
       plan_id: options.planId,
-      conversation_id: options.conversationId
+      conversation_id: options.conversationId,
+      plan_snapshot: options.planSnapshot
     })
   });
 
@@ -137,6 +141,7 @@ function submitQuery(rawQuery) {
   if (isMultiTurn() && stage === "plan") {
     pendingPlanId = null;
     awaitingPlanClarification = false;
+    lastPlanInput = query;
   }
   startStream(query, { stage });
   input.value = "";
@@ -146,6 +151,23 @@ function clearInputPlaceholder() {
   if (!input || placeholderCleared) return;
   input.setAttribute("placeholder", "");
   placeholderCleared = true;
+}
+
+function buildPlanSnapshot() {
+  if (!pendingPlanPayload) return null;
+  const baseInput = pendingPlanBaseInput || "";
+  if (!baseInput) return null;
+  try {
+    const snapshot = JSON.stringify({ plan: pendingPlanPayload, baseInput });
+    return encodeBase64Url(snapshot);
+  } catch (err) {
+    return null;
+  }
+}
+
+function encodeBase64Url(value) {
+  const encoded = btoa(unescape(encodeURIComponent(value)));
+  return encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
 function isMultiTurn() {
@@ -366,6 +388,12 @@ function startStream(query, options = {}) {
     if (stage === "execute" && pendingPlanId) {
       params.set("plan_id", pendingPlanId);
     }
+    if (stage === "execute") {
+      const snapshot = buildPlanSnapshot();
+      if (snapshot) {
+        params.set("plan_snapshot", snapshot);
+      }
+    }
   }
   const streamUrl = `/api/analyze/stream?${params.toString()}`;
   const source = new EventSource(streamUrl);
@@ -420,7 +448,8 @@ async function runFallback(query, options = {}) {
     const payload = await analyzeMarket(query, {
       stage: options.stage,
       planId: pendingPlanId,
-      conversationId
+      conversationId,
+      planSnapshot: buildPlanSnapshot()
     });
     if (payload.mode === "plan") {
       renderPlan(payload);
@@ -461,6 +490,9 @@ function renderPlan(payload) {
   setResultsPlaceholderVisible(true);
   pendingPlanId = payload.plan_id || pendingPlanId;
   awaitingPlanClarification = true;
+  pendingPlanPayload = payload;
+  pendingPlanBaseInput =
+    payload.base_input || pendingPlanBaseInput || lastPlanInput || pendingPlanBaseInput;
 
   const shell = createChatShell("assistant", "plan-message");
   if (!shell) return;
@@ -578,6 +610,8 @@ function renderResults(payload) {
     finalizeStreamMessage();
     awaitingPlanClarification = false;
     pendingPlanId = null;
+    pendingPlanPayload = null;
+    pendingPlanBaseInput = "";
     hasResults = true;
     if (appRoot) {
       appRoot.classList.add("has-results");
@@ -651,6 +685,8 @@ function renderApology(apologyPayload) {
     setResultsPlaceholderVisible(true);
     awaitingPlanClarification = false;
     pendingPlanId = null;
+    pendingPlanPayload = null;
+    pendingPlanBaseInput = "";
     appendAssistantMessage(content.title || "Signal Lost", `${message} ${hint}`.trim());
     apology.classList.add("hidden");
     return;
