@@ -416,6 +416,7 @@ export default async function handler(req, res) {
       }
 
       const html = buildTraceHtml(result);
+      addRenderHtmlMetadata(trace, html);
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
@@ -451,6 +452,7 @@ export default async function handler(req, res) {
     trace.event("cache_hit", { key: cached.key, source: cached.source });
     sendStreamEvent(res, closed, "status", { message: "Cache hit. Returning cached results." });
     const html = buildTraceHtml(cached.payload);
+    addRenderHtmlMetadata(trace, html);
     cached.payload.trace_parent = traceParent;
     sendStreamEvent(res, closed, "final", cached.payload);
     await finalizeTrace(trace, cached.payload, html);
@@ -495,6 +497,7 @@ export default async function handler(req, res) {
           message: "Queue timeout. Returning cached results."
         });
         const html = buildTraceHtml(stale.payload);
+        addRenderHtmlMetadata(trace, html);
         stale.payload.trace_parent = traceParent;
         sendStreamEvent(res, closed, "final", stale.payload);
         await finalizeTrace(trace, stale.payload, html);
@@ -517,6 +520,7 @@ export default async function handler(req, res) {
     const result = queued.value;
     sendStreamEvent(res, closed, "status", { message: "Finalizing results..." });
     const html = buildTraceHtml(result);
+    addRenderHtmlMetadata(trace, html);
     storeCachedPayload(input, result);
     result.trace_parent = traceParent;
     sendStreamEvent(res, closed, "final", result);
@@ -558,6 +562,15 @@ function shouldLogRenderHtml(payload) {
 function buildTraceHtml(payload, htmlPayload = payload) {
   if (!shouldLogRenderHtml(payload)) return null;
   return renderHtml(htmlPayload);
+}
+
+function addRenderHtmlMetadata(trace, html) {
+  if (!trace?.addMetadata || typeof html !== "string") return;
+  trace.addMetadata({
+    render_html: html,
+    render_html_len: html.length,
+    render_html_preview: html.slice(0, 200)
+  });
 }
 
 function startStream(res) {

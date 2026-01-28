@@ -294,6 +294,7 @@ export default async function handler(req, res) {
         planStore.delete(planId);
       }
       const html = buildTraceHtml(result);
+      addRenderHtmlMetadata(trace, html);
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
@@ -309,6 +310,7 @@ export default async function handler(req, res) {
       trace.event("cache_hit", { key: cached.key, source: cached.source });
       cached.payload.trace_parent = traceParent;
       const html = buildTraceHtml(cached.payload);
+      addRenderHtmlMetadata(trace, html);
       await finalizeTrace(trace, cached.payload, html);
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
@@ -333,6 +335,7 @@ export default async function handler(req, res) {
         });
         stale.payload.trace_parent = traceParent;
         const html = buildTraceHtml(stale.payload);
+        addRenderHtmlMetadata(trace, html);
         await finalizeTrace(trace, stale.payload, html);
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
@@ -351,6 +354,7 @@ export default async function handler(req, res) {
 
     const result = { ...queued.value, trace_parent: traceParent };
     const html = buildTraceHtml(result);
+    addRenderHtmlMetadata(trace, html);
     storeCachedPayload(input, result);
     await finalizeTrace(trace, result, html);
     res.statusCode = 200;
@@ -390,6 +394,15 @@ function shouldLogRenderHtml(payload) {
 function buildTraceHtml(payload, htmlPayload = payload) {
   if (!shouldLogRenderHtml(payload)) return null;
   return renderHtml(htmlPayload);
+}
+
+function addRenderHtmlMetadata(trace, html) {
+  if (!trace?.addMetadata || typeof html !== "string") return;
+  trace.addMetadata({
+    render_html: html,
+    render_html_len: html.length,
+    render_html_preview: html.slice(0, 200)
+  });
 }
 
 function normalizeKey(value) {
