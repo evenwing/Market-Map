@@ -17,6 +17,7 @@ const PLAN_TTL_MS = Number(process.env.PLAN_TTL_MINUTES || 30) * 60 * 1000;
 const TRACE_TTL_MS = Number(process.env.TRACE_TTL_MINUTES || 45) * 60 * 1000;
 const TRACE_FLUSH_TIMEOUT_MS = Number(process.env.TRACE_FLUSH_TIMEOUT_MS || 3000);
 const TRACE_CITATION_TIMEOUT_MS = Number(process.env.TRACE_CITATION_TIMEOUT_MS || 8000);
+const uiMode = process.env.UI_MODE === "multi" ? "multi" : "single";
 const inputCache = new Map();
 const categoryCache = new Map();
 const planStore = new Map();
@@ -70,7 +71,7 @@ export default async function handler(req, res) {
   const fallback = buildApologyPayload();
 
   if (!input && stage !== "execute") {
-    const html = renderHtml(fallback);
+    const html = buildTraceHtml(fallback);
     await trace.end(fallback, html);
     if (traceContext.persistent) {
       traceStore.delete(conversationId);
@@ -109,7 +110,7 @@ export default async function handler(req, res) {
           if (traceContext.persistent) {
             traceStore.delete(conversationId);
           }
-          const html = renderHtml(errorPayload);
+          const html = buildTraceHtml(errorPayload);
           await trace.end(errorPayload, html);
           res.statusCode = 200;
           res.setHeader("Content-Type", "application/json");
@@ -135,7 +136,7 @@ export default async function handler(req, res) {
           ranking_basis: planPayload.ranking_basis
         });
         if (!traceContext.persistent) {
-          const html = renderHtml(fallback);
+          const html = buildTraceHtml(planPayload, fallback);
           await trace.end(planPayload, html);
         }
         res.statusCode = 200;
@@ -156,7 +157,7 @@ export default async function handler(req, res) {
           debug: { message: "Plan expired. Please submit a new query." },
           trace_parent: traceParent
         };
-        const html = renderHtml(errorPayload);
+        const html = buildTraceHtml(errorPayload);
         await trace.end(errorPayload, html);
         if (traceContext.persistent) {
           traceStore.delete(conversationId);
@@ -215,12 +216,12 @@ export default async function handler(req, res) {
           );
 
           if (queuedPlan.status === "timeout") {
-          const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
-          errorPayload.trace_parent = traceParent;
+            const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
+            errorPayload.trace_parent = traceParent;
             if (traceContext.persistent) {
               traceStore.delete(conversationId);
             }
-            const html = renderHtml(errorPayload);
+            const html = buildTraceHtml(errorPayload);
             await trace.end(errorPayload, html);
             res.statusCode = 200;
             res.setHeader("Content-Type", "application/json");
@@ -246,7 +247,7 @@ export default async function handler(req, res) {
             ranking_basis: planPayload.ranking_basis
           });
           if (!traceContext.persistent) {
-            const html = renderHtml(fallback);
+            const html = buildTraceHtml(planPayload, fallback);
             await trace.end(planPayload, html);
           }
           res.statusCode = 200;
@@ -275,7 +276,7 @@ export default async function handler(req, res) {
 
       if (queued.status === "timeout") {
         const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
-        const html = renderHtml(errorPayload);
+        const html = buildTraceHtml(errorPayload);
         await trace.end(errorPayload, html);
         if (traceContext.persistent) {
           traceStore.delete(conversationId);
@@ -292,7 +293,7 @@ export default async function handler(req, res) {
       if (planId) {
         planStore.delete(planId);
       }
-      const html = renderHtml(result);
+      const html = buildTraceHtml(result);
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
@@ -307,7 +308,7 @@ export default async function handler(req, res) {
     if (cached) {
       trace.event("cache_hit", { key: cached.key, source: cached.source });
       cached.payload.trace_parent = traceParent;
-      const html = renderHtml(cached.payload);
+      const html = buildTraceHtml(cached.payload);
       await finalizeTrace(trace, cached.payload, html);
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
@@ -331,7 +332,7 @@ export default async function handler(req, res) {
           stale: stale.stale
         });
         stale.payload.trace_parent = traceParent;
-        const html = renderHtml(stale.payload);
+        const html = buildTraceHtml(stale.payload);
         await finalizeTrace(trace, stale.payload, html);
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
@@ -340,7 +341,7 @@ export default async function handler(req, res) {
       }
       const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
       errorPayload.trace_parent = traceParent;
-      const html = renderHtml(errorPayload);
+      const html = buildTraceHtml(errorPayload);
       await trace.end(errorPayload, html);
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
@@ -349,7 +350,7 @@ export default async function handler(req, res) {
     }
 
     const result = { ...queued.value, trace_parent: traceParent };
-    const html = renderHtml(result);
+    const html = buildTraceHtml(result);
     storeCachedPayload(input, result);
     await finalizeTrace(trace, result, html);
     res.statusCode = 200;
@@ -358,7 +359,7 @@ export default async function handler(req, res) {
   } catch (err) {
     const errorPayload = { ...fallback, debug: { message: err.message || "Unknown error" } };
     errorPayload.trace_parent = traceParent;
-    const html = renderHtml(errorPayload);
+    const html = buildTraceHtml(errorPayload);
     trace.event("error", { message: err.message });
     await trace.error(err, html);
     if (traceContext.persistent) {
@@ -379,6 +380,16 @@ function buildApologyPayload() {
       hint: "Try: CRM, payments, video conferencing."
     }
   };
+}
+
+function shouldLogRenderHtml(payload) {
+  if (uiMode !== "multi") return true;
+  return payload?.mode === "results";
+}
+
+function buildTraceHtml(payload, htmlPayload = payload) {
+  if (!shouldLogRenderHtml(payload)) return null;
+  return renderHtml(htmlPayload);
 }
 
 function normalizeKey(value) {

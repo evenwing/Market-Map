@@ -99,7 +99,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
 
   if (!input && stage !== "execute") {
     sendStreamEvent(res, closed, "status", { message: "No market signal detected." });
-    const html = renderHtml(fallback);
+    const html = buildTraceHtml(fallback);
     await trace.end(fallback, html);
     if (traceContext.persistent) {
       traceStore.delete(conversationId);
@@ -155,7 +155,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         if (traceContext.persistent) {
           traceStore.delete(conversationId);
         }
-        const html = renderHtml(errorPayload);
+        const html = buildTraceHtml(errorPayload);
         await trace.end(errorPayload, html);
         sendStreamEvent(res, closed, "debug", { message: errorPayload.debug.message });
         sendStreamEvent(res, closed, "final", errorPayload);
@@ -180,7 +180,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         ranking_basis: planPayload.ranking_basis
       });
       if (!traceContext.persistent) {
-        const html = renderHtml(fallback);
+        const html = buildTraceHtml(planPayload, fallback);
         await trace.end(planPayload, html);
       }
       sendStreamEvent(res, closed, "final", planPayload);
@@ -196,7 +196,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
-      const html = renderHtml(errorPayload);
+      const html = buildTraceHtml(errorPayload);
       trace.event("error", { message: err.message });
       await trace.error(err, html);
       sendStreamEvent(res, closed, "debug", { message: err.message || "Unknown error" });
@@ -215,7 +215,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         ...fallback,
         debug: { message: "Plan expired. Please submit a new query." }
       };
-      const html = renderHtml(errorPayload);
+      const html = buildTraceHtml(errorPayload);
       await trace.end(errorPayload, html);
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
@@ -314,7 +314,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
             ...fallback,
             debug: { message: "Server busy. Please retry." }
           };
-          const html = renderHtml(errorPayload);
+          const html = buildTraceHtml(errorPayload);
           await trace.end(errorPayload, html);
           if (traceContext.persistent) {
             traceStore.delete(conversationId);
@@ -342,7 +342,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
           ranking_basis: planPayload.ranking_basis
         });
         if (!traceContext.persistent) {
-          const html = renderHtml(fallback);
+          const html = buildTraceHtml(planPayload, fallback);
           await trace.end(planPayload, html);
         }
         sendStreamEvent(res, closed, "final", planPayload);
@@ -355,7 +355,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
             message: err.message || "Unknown error"
           }
         };
-        const html = renderHtml(errorPayload);
+        const html = buildTraceHtml(errorPayload);
         trace.event("error", { message: err.message });
         await trace.error(err, html);
         if (traceContext.persistent) {
@@ -410,7 +410,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
           ...fallback,
           debug: { message: "Server busy. Please retry." }
         };
-        const html = renderHtml(errorPayload);
+        const html = buildTraceHtml(errorPayload);
         await trace.end(errorPayload, html);
         if (traceContext.persistent) {
           traceStore.delete(conversationId);
@@ -433,7 +433,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         planStore.delete(planIdParam);
       }
 
-      const html = renderHtml(result);
+      const html = buildTraceHtml(result);
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
@@ -448,7 +448,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
           message: err.message || "Unknown error"
         }
       };
-      const html = renderHtml(errorPayload);
+      const html = buildTraceHtml(errorPayload);
       trace.event("error", { message: err.message });
       await trace.error(err, html);
       if (traceContext.persistent) {
@@ -466,7 +466,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
   if (cached) {
     trace.event("cache_hit", { key: cached.key, source: cached.source });
     sendStreamEvent(res, closed, "status", { message: "Cache hit. Returning cached results." });
-    const html = renderHtml(cached.payload);
+    const html = buildTraceHtml(cached.payload);
     sendStreamEvent(res, closed, "final", cached.payload);
     await finalizeTrace(trace, cached.payload, html);
     res.end();
@@ -509,7 +509,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         sendStreamEvent(res, closed, "status", {
           message: "Queue timeout. Returning cached results."
         });
-        const html = renderHtml(stale.payload);
+        const html = buildTraceHtml(stale.payload);
         sendStreamEvent(res, closed, "final", stale.payload);
         await finalizeTrace(trace, stale.payload, html);
         res.end();
@@ -519,7 +519,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         ...fallback,
         debug: { message: "Server busy. Please retry." }
       };
-      const html = renderHtml(errorPayload);
+      const html = buildTraceHtml(errorPayload);
       await trace.end(errorPayload, html);
       sendStreamEvent(res, closed, "debug", { message: errorPayload.debug.message });
       sendStreamEvent(res, closed, "final", errorPayload);
@@ -529,7 +529,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
 
     const result = queued.value;
     sendStreamEvent(res, closed, "status", { message: "Finalizing results..." });
-    const html = renderHtml(result);
+    const html = buildTraceHtml(result);
     storeCachedPayload(input, result);
     sendStreamEvent(res, closed, "final", result);
     await finalizeTrace(trace, result, html);
@@ -541,7 +541,7 @@ async function handleAnalyzeStream(req, res, requestUrl) {
         message: err.message || "Unknown error"
       }
     };
-    const html = renderHtml(errorPayload);
+    const html = buildTraceHtml(errorPayload);
     trace.event("error", { message: err.message });
     await trace.error(err, html);
     if (traceContext.persistent) {
@@ -583,7 +583,7 @@ async function handleAnalyze(req, res) {
   const fallback = buildApologyPayload();
 
   if (!input && stage !== "execute") {
-    const html = renderHtml(fallback);
+    const html = buildTraceHtml(fallback);
     await trace.end(fallback, html);
     if (traceContext.persistent) {
       traceStore.delete(conversationId);
@@ -620,7 +620,7 @@ async function handleAnalyze(req, res) {
           if (traceContext.persistent) {
             traceStore.delete(conversationId);
           }
-          const html = renderHtml(errorPayload);
+          const html = buildTraceHtml(errorPayload);
           await trace.end(errorPayload, html);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(errorPayload));
@@ -644,7 +644,7 @@ async function handleAnalyze(req, res) {
           ranking_basis: planPayload.ranking_basis
         });
         if (!traceContext.persistent) {
-          const html = renderHtml(fallback);
+          const html = buildTraceHtml(planPayload, fallback);
           await trace.end(planPayload, html);
         }
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -662,7 +662,7 @@ async function handleAnalyze(req, res) {
           ...fallback,
           debug: { message: "Plan expired. Please submit a new query." }
         };
-        const html = renderHtml(errorPayload);
+        const html = buildTraceHtml(errorPayload);
         await trace.end(errorPayload, html);
         if (traceContext.persistent) {
           traceStore.delete(conversationId);
@@ -724,7 +724,7 @@ async function handleAnalyze(req, res) {
             if (traceContext.persistent) {
               traceStore.delete(conversationId);
             }
-            const html = renderHtml(errorPayload);
+            const html = buildTraceHtml(errorPayload);
             await trace.end(errorPayload, html);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(errorPayload));
@@ -748,7 +748,7 @@ async function handleAnalyze(req, res) {
             ranking_basis: planPayload.ranking_basis
           });
           if (!traceContext.persistent) {
-            const html = renderHtml(fallback);
+            const html = buildTraceHtml(planPayload, fallback);
             await trace.end(planPayload, html);
           }
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -776,7 +776,7 @@ async function handleAnalyze(req, res) {
 
       if (queued.status === "timeout") {
         const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
-        const html = renderHtml(errorPayload);
+        const html = buildTraceHtml(errorPayload);
         await trace.end(errorPayload, html);
         if (traceContext.persistent) {
           traceStore.delete(conversationId);
@@ -791,7 +791,7 @@ async function handleAnalyze(req, res) {
       if (planId) {
         planStore.delete(planId);
       }
-      const html = renderHtml(result);
+      const html = buildTraceHtml(result);
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
@@ -804,7 +804,7 @@ async function handleAnalyze(req, res) {
     const cached = findCachedPayload(input);
     if (cached) {
       trace.event("cache_hit", { key: cached.key, source: cached.source });
-      const html = renderHtml(cached.payload);
+      const html = buildTraceHtml(cached.payload);
       await finalizeTrace(trace, cached.payload, html);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(cached.payload));
@@ -826,14 +826,14 @@ async function handleAnalyze(req, res) {
           source: stale.source,
           stale: stale.stale
         });
-        const html = renderHtml(stale.payload);
+        const html = buildTraceHtml(stale.payload);
         await finalizeTrace(trace, stale.payload, html);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(stale.payload));
         return;
       }
       const errorPayload = { ...fallback, debug: { message: "Server busy. Please retry." } };
-      const html = renderHtml(errorPayload);
+      const html = buildTraceHtml(errorPayload);
       await trace.end(errorPayload, html);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(errorPayload));
@@ -841,14 +841,14 @@ async function handleAnalyze(req, res) {
     }
 
     const result = queued.value;
-    const html = renderHtml(result);
+    const html = buildTraceHtml(result);
     storeCachedPayload(input, result);
     await finalizeTrace(trace, result, html);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(result));
   } catch (err) {
     const errorPayload = { ...fallback, debug: { message: err.message || "Unknown error" } };
-    const html = renderHtml(errorPayload);
+    const html = buildTraceHtml(errorPayload);
     trace.event("error", { message: err.message });
     await trace.error(err, html);
     if (traceContext.persistent) {
@@ -907,6 +907,16 @@ function buildApologyPayload() {
       hint: "Try: CRM, payments, video conferencing."
     }
   };
+}
+
+function shouldLogRenderHtml(payload) {
+  if (uiMode !== "multi") return true;
+  return payload?.mode === "results";
+}
+
+function buildTraceHtml(payload, htmlPayload = payload) {
+  if (!shouldLogRenderHtml(payload)) return null;
+  return renderHtml(htmlPayload);
 }
 
 function startStream(res) {

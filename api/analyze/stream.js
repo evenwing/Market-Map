@@ -18,6 +18,7 @@ const TRACE_TTL_MS = Number(process.env.TRACE_TTL_MINUTES || 45) * 60 * 1000;
 const TRACE_FLUSH_TIMEOUT_MS = Number(process.env.TRACE_FLUSH_TIMEOUT_MS || 3000);
 const TRACE_CITATION_TIMEOUT_MS = Number(process.env.TRACE_CITATION_TIMEOUT_MS || 8000);
 const HEARTBEAT_INTERVAL_MS = Number(process.env.SSE_HEARTBEAT_MS || 15000);
+const uiMode = process.env.UI_MODE === "multi" ? "multi" : "single";
 const inputCache = new Map();
 const categoryCache = new Map();
 const planStore = new Map();
@@ -70,7 +71,7 @@ export default async function handler(req, res) {
 
   if (!input && stage !== "execute") {
     sendStreamEvent(res, closed, "status", { message: "No market signal detected." });
-    const html = renderHtml(fallback);
+    const html = buildTraceHtml(fallback);
     await trace.end(fallback, html);
     if (traceContext.persistent) {
       traceStore.delete(conversationId);
@@ -128,7 +129,7 @@ export default async function handler(req, res) {
         if (traceContext.persistent) {
           traceStore.delete(conversationId);
         }
-        const html = renderHtml(errorPayload);
+        const html = buildTraceHtml(errorPayload);
         await trace.end(errorPayload, html);
         sendStreamEvent(res, closed, "debug", { message: errorPayload.debug.message });
         sendStreamEvent(res, closed, "final", errorPayload);
@@ -154,7 +155,7 @@ export default async function handler(req, res) {
         ranking_basis: planPayload.ranking_basis
       });
       if (!traceContext.persistent) {
-        const html = renderHtml(fallback);
+        const html = buildTraceHtml(planPayload, fallback);
         await trace.end(planPayload, html);
       }
       sendStreamEvent(res, closed, "final", planPayload);
@@ -171,7 +172,7 @@ export default async function handler(req, res) {
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
-      const html = renderHtml(errorPayload);
+      const html = buildTraceHtml(errorPayload);
       trace.event("error", { message: err.message });
       await trace.error(err, html);
       sendStreamEvent(res, closed, "debug", { message: err.message || "Unknown error" });
@@ -192,7 +193,7 @@ export default async function handler(req, res) {
         debug: { message: "Plan expired. Please submit a new query." },
         trace_parent: traceParent
       };
-      const html = renderHtml(errorPayload);
+      const html = buildTraceHtml(errorPayload);
       await trace.end(errorPayload, html);
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
@@ -292,7 +293,7 @@ export default async function handler(req, res) {
             debug: { message: "Server busy. Please retry." }
           };
           errorPayload.trace_parent = traceParent;
-          const html = renderHtml(errorPayload);
+          const html = buildTraceHtml(errorPayload);
           await trace.end(errorPayload, html);
           if (traceContext.persistent) {
             traceStore.delete(conversationId);
@@ -321,7 +322,7 @@ export default async function handler(req, res) {
           ranking_basis: planPayload.ranking_basis
         });
         if (!traceContext.persistent) {
-          const html = renderHtml(fallback);
+          const html = buildTraceHtml(planPayload, fallback);
           await trace.end(planPayload, html);
         }
         sendStreamEvent(res, closed, "final", planPayload);
@@ -335,7 +336,7 @@ export default async function handler(req, res) {
           }
         };
         errorPayload.trace_parent = traceParent;
-        const html = renderHtml(errorPayload);
+        const html = buildTraceHtml(errorPayload);
         trace.event("error", { message: err.message });
         await trace.error(err, html);
         if (traceContext.persistent) {
@@ -391,7 +392,7 @@ export default async function handler(req, res) {
           debug: { message: "Server busy. Please retry." }
         };
         errorPayload.trace_parent = traceParent;
-        const html = renderHtml(errorPayload);
+        const html = buildTraceHtml(errorPayload);
         await trace.end(errorPayload, html);
         if (traceContext.persistent) {
           traceStore.delete(conversationId);
@@ -414,7 +415,7 @@ export default async function handler(req, res) {
         planStore.delete(planIdParam);
       }
 
-      const html = renderHtml(result);
+      const html = buildTraceHtml(result);
       if (traceContext.persistent) {
         traceStore.delete(conversationId);
       }
@@ -431,7 +432,7 @@ export default async function handler(req, res) {
         }
       };
       errorPayload.trace_parent = traceParent;
-      const html = renderHtml(errorPayload);
+      const html = buildTraceHtml(errorPayload);
       trace.event("error", { message: err.message });
       await trace.error(err, html);
       if (traceContext.persistent) {
@@ -449,7 +450,7 @@ export default async function handler(req, res) {
   if (cached) {
     trace.event("cache_hit", { key: cached.key, source: cached.source });
     sendStreamEvent(res, closed, "status", { message: "Cache hit. Returning cached results." });
-    const html = renderHtml(cached.payload);
+    const html = buildTraceHtml(cached.payload);
     cached.payload.trace_parent = traceParent;
     sendStreamEvent(res, closed, "final", cached.payload);
     await finalizeTrace(trace, cached.payload, html);
@@ -493,7 +494,7 @@ export default async function handler(req, res) {
         sendStreamEvent(res, closed, "status", {
           message: "Queue timeout. Returning cached results."
         });
-        const html = renderHtml(stale.payload);
+        const html = buildTraceHtml(stale.payload);
         stale.payload.trace_parent = traceParent;
         sendStreamEvent(res, closed, "final", stale.payload);
         await finalizeTrace(trace, stale.payload, html);
@@ -505,7 +506,7 @@ export default async function handler(req, res) {
         debug: { message: "Server busy. Please retry." }
       };
       errorPayload.trace_parent = traceParent;
-      const html = renderHtml(errorPayload);
+      const html = buildTraceHtml(errorPayload);
       await trace.end(errorPayload, html);
       sendStreamEvent(res, closed, "debug", { message: errorPayload.debug.message });
       sendStreamEvent(res, closed, "final", errorPayload);
@@ -515,7 +516,7 @@ export default async function handler(req, res) {
 
     const result = queued.value;
     sendStreamEvent(res, closed, "status", { message: "Finalizing results..." });
-    const html = renderHtml(result);
+    const html = buildTraceHtml(result);
     storeCachedPayload(input, result);
     result.trace_parent = traceParent;
     sendStreamEvent(res, closed, "final", result);
@@ -529,7 +530,7 @@ export default async function handler(req, res) {
       }
     };
     errorPayload.trace_parent = traceParent;
-    const html = renderHtml(errorPayload);
+    const html = buildTraceHtml(errorPayload);
     trace.event("error", { message: err.message });
     await trace.error(err, html);
     sendStreamEvent(res, closed, "debug", { message: err.message || "Unknown error" });
@@ -547,6 +548,16 @@ function buildApologyPayload() {
       hint: "Try: CRM, payments, video conferencing."
     }
   };
+}
+
+function shouldLogRenderHtml(payload) {
+  if (uiMode !== "multi") return true;
+  return payload?.mode === "results";
+}
+
+function buildTraceHtml(payload, htmlPayload = payload) {
+  if (!shouldLogRenderHtml(payload)) return null;
+  return renderHtml(htmlPayload);
 }
 
 function startStream(res) {
